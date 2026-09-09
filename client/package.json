@@ -1,0 +1,31 @@
+{
+  "name": "@last-vector/client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LAST-VECTOR browser client — React UI shell + PixiJS WebGL renderer + Rapier physics.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview --host",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@dimforge/rapier2d-compat": "^0.20.0",
+    "@last-vector/shared": "*",
+    "colyseus.js": "^0.16.22",
+    "howler": "^2.2.4",
+    "pixi.js": "^8.20.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@types/howler": "^2.2.13",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^5.2.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.6"
+  }
+}
