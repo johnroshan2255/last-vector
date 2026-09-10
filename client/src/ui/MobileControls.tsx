@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useGameStore } from '../store/gameStore';
+import { BOMBS, BOMB_ORDER } from '@shared/weapons';
+import { bombIconUrl } from '../game/sprites';
 
 export interface TouchState {
   moveX: -1 | 0 | 1;
@@ -10,6 +12,8 @@ export interface TouchState {
   swap: boolean;
   bombType: boolean;
   pause: boolean;
+  /** scope zoom toggle */
+  zoom: boolean;
 }
 
 interface Props {
@@ -29,7 +33,8 @@ const KNOB_TRAVEL = 30; // px
  */
 export function MobileControls({ onChange }: Props) {
   const phase = useGameStore((s) => s.phase);
-  const state = useRef<TouchState>({ moveX: 0, jet: false, fire: false, aimAngle: null, bomb: false, swap: false, bombType: false, pause: false });
+  const hud = useGameStore((s) => s.hud);
+  const state = useRef<TouchState>({ moveX: 0, jet: false, fire: false, aimAngle: null, bomb: false, swap: false, bombType: false, pause: false, zoom: false });
   const left = useRef<{ id: number; ox: number; oy: number } | null>(null);
   const right = useRef<{ id: number; ox: number; oy: number } | null>(null);
   const leftBase = useRef<HTMLDivElement>(null);
@@ -43,7 +48,7 @@ export function MobileControls({ onChange }: Props) {
 
   useEffect(() => {
     if (phase !== 'playing') {
-      state.current = { moveX: 0, jet: false, fire: false, aimAngle: null, bomb: false, swap: false, bombType: false, pause: false };
+      state.current = { moveX: 0, jet: false, fire: false, aimAngle: null, bomb: false, swap: false, bombType: false, pause: false, zoom: false };
       left.current = right.current = null;
       onChange({ ...state.current });
     }
@@ -108,7 +113,7 @@ export function MobileControls({ onChange }: Props) {
     } else state.current.fire = false;
     emit();
   };
-  const tap = (key: 'bomb' | 'swap' | 'bombType' | 'pause') => (e: React.PointerEvent) => {
+  const tap = (key: 'bomb' | 'swap' | 'bombType' | 'pause' | 'zoom') => (e: React.PointerEvent) => {
     e.stopPropagation();
     state.current[key] = true;
     emit();
@@ -132,18 +137,39 @@ export function MobileControls({ onChange }: Props) {
         </div>
       </div>
       <div className="mbtns">
-        <button className="mbtn" data-action="m-bomb" onPointerDown={tap('bomb')}>
-          BOMB
-        </button>
-        <button className="mbtn" data-action="m-swap" onPointerDown={tap('swap')}>
-          SWAP
-        </button>
-        <button className="mbtn small" data-action="m-bombtype" onPointerDown={tap('bombType')}>
-          TYPE
-        </button>
-        <button className="mbtn small" data-action="m-pause" onPointerDown={tap('pause')}>
-          II
-        </button>
+        {(() => {
+          // the throw button shows the bomb in hand; the small one shows the next type you still have
+          const kit = hud.bombKit;
+          const cur = hud.bombType;
+          const count = hud.bombCounts[BOMB_ORDER.indexOf(cur)] ?? 0;
+          const i = kit.indexOf(cur);
+          let next = cur;
+          for (let s = 1; s <= kit.length; s++) {
+            const c = kit[(i + s) % kit.length];
+            if ((hud.bombCounts[BOMB_ORDER.indexOf(c)] ?? 0) > 0) {
+              next = c;
+              break;
+            }
+          }
+          return (
+            <>
+              <button className={`mbtn bomb ${count === 0 ? 'empty' : ''}`} data-action="m-bomb" data-bomb={cur} onPointerDown={tap('bomb')} style={{ '--c': `#${BOMBS[cur].color.toString(16).padStart(6, '0')}` } as React.CSSProperties}>
+                <img className="mbtn-icon" src={bombIconUrl(cur, 4)} alt="" draggable={false} />
+                <span className="mbtn-count">{count}</span>
+              </button>
+              <button className="mbtn" data-action="m-swap" onPointerDown={tap('swap')}>
+                SWAP
+              </button>
+              <button className={`mbtn small ${next === cur ? 'dim' : ''}`} data-action="m-bombtype" data-next={next} onPointerDown={tap('bombType')} title="switch bomb" style={{ '--c': `#${BOMBS[next].color.toString(16).padStart(6, '0')}` } as React.CSSProperties}>
+                <img className="mbtn-icon small" src={bombIconUrl(next, 3)} alt="" draggable={false} />
+                <span className="mbtn-sub">{next === cur ? 'ONLY' : 'NEXT'}</span>
+              </button>
+              <button className="mbtn small" data-action="m-zoom" onPointerDown={tap('zoom')}>
+                {hud.zoom !== 1 ? `${hud.zoom}X` : 'ZOOM'}
+              </button>
+            </>
+          );
+        })()}
       </div>
     </div>
   );

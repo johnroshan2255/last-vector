@@ -129,6 +129,22 @@ export class TileMapView {
     for (const i of indices) this.refreshTile(i % this.grid.w, Math.floor(i / this.grid.w));
   }
 
+  /** rock currently on fire glows orange; everything else is reset to white */
+  private burningNow = new Set<number>();
+  setBurning(indices: number[], time: number): void {
+    for (const i of this.burningNow) if (!indices.includes(i)) {
+      const s = this.sprites[i];
+      if (s) s.tint = 0xffffff;
+    }
+    this.burningNow.clear();
+    for (const i of indices) {
+      const s = this.sprites[i];
+      if (!s) continue;
+      s.tint = Math.sin(time * 18 + i) > 0 ? 0xff9a4a : 0xffd080;
+      this.burningNow.add(i);
+    }
+  }
+
   /** tiles that just regrew fade in over ~0.35 s */
   markGrowing(indices: number[]): void {
     for (const i of indices) {

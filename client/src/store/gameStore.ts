@@ -1,8 +1,8 @@
 import { create } from 'zustand';
-import type { BiomeId } from '@shared/constants';
-import type { BombType, WeaponId } from '@shared/weapons';
+import { bombStartCounts, BOMB_ORDER, type BombType, type WeaponId } from '@shared/weapons';
+import { DEFAULT_MAP, type MapId } from '@shared/maps';
 
-export type Phase = 'loading' | 'menu' | 'connecting' | 'playing' | 'paused' | 'gameover';
+export type Phase = 'loading' | 'menu' | 'connecting' | 'lobby' | 'playing' | 'paused' | 'gameover';
 
 export interface HudState {
   health: number;
@@ -25,17 +25,32 @@ export interface HudState {
   bombs: number;
   bombsMax: number;
   bombType: BombType;
-  bombCounts: [number, number, number];
+  bombCounts: number[];
+  /** bombs available on the current map (HUD shows only these) */
+  bombKit: BombType[];
+  map: MapId;
   players: number;
   /** transient banner text (wave start, unlock) */
   banner: string | null;
+  /** online: dead and waiting to respawn */
+  death: { by: string | null; respawnIn: number } | null;
+  /** online: last few kill-feed lines, newest last */
+  feed: string[];
+  /** scope zoom: 1 = normal, 0.5 = wide */
+  zoom: number;
+  /** crate within reach: press TAKE to swap it in */
+  nearDrop: { weapon: WeaponId | null; bomb: BombType | null } | null;
+  /** seconds the jetpack is offline (EMP) */
+  jammed: number;
 }
 
 export interface Settings {
   muted: boolean;
   shake: boolean;
   lighting: boolean;
-  biome: BiomeId;
+  map: MapId;
+  /** callsign shown to other players (empty = server default PILOT-XXXX) */
+  name: string;
 }
 
 export interface Best {
@@ -61,11 +76,31 @@ export interface DebugState {
   colliders: number;
 }
 
+export interface RosterEntry {
+  id: string;
+  name: string;
+  kills: number;
+  deaths: number;
+  alive: boolean;
+  host: boolean;
+  me: boolean;
+}
+
 export interface OnlineState {
   online: boolean;
   players: number;
+  maxPlayers: number;
   roomId: string | null;
+  /** room code to share */
+  code: string | null;
+  hostId: string | null;
+  isHost: boolean;
+  /** false while the hosted room waits in its lobby */
+  started: boolean;
+  roster: RosterEntry[];
   error: string | null;
+  /** informational message shown on the menu (e.g. the host left) */
+  notice: string | null;
 }
 
 interface GameStore {
@@ -76,6 +111,9 @@ interface GameStore {
   lastRun: { wave: number; kills: number; shards: number; score: number } | null;
   net: OnlineState;
   setNet: (n: Partial<OnlineState>) => void;
+  /** settings modal (menu / lobby / pause) */
+  settingsOpen: boolean;
+  setSettingsOpen: (open: boolean) => void;
   debug: DebugState;
   setDebug: (d: Partial<DebugState>) => void;
   setPhase: (p: Phase) => void;
@@ -84,6 +122,8 @@ interface GameStore {
   setBest: (b: Best) => void;
   setLastRun: (r: GameStore['lastRun']) => void;
 }
+
+export const offlineNet: OnlineState = { online: false, players: 0, maxPlayers: 12, roomId: null, code: null, hostId: null, isHost: false, started: false, roster: [], error: null, notice: null };
 
 const SETTINGS_KEY = 'lv.settings';
 const BEST_KEY = 'lv.best';
@@ -125,19 +165,33 @@ export const initialHud: HudState = {
   bombs: 5,
   bombsMax: 5,
   bombType: 'gel',
-  bombCounts: [5, 3, 3],
+  bombCounts: bombStartCounts(),
+  bombKit: [...BOMB_ORDER],
+  map: DEFAULT_MAP,
   players: 1,
   banner: null,
+  death: null,
+  feed: [],
+  zoom: 1,
+  nearDrop: null,
+  jammed: 0,
 };
 
 export const useGameStore = create<GameStore>((set) => ({
   phase: 'loading',
   hud: initialHud,
-  settings: load<Settings>(SETTINGS_KEY, { muted: false, shake: true, lighting: true, biome: 'verdant' }),
+  settings: (() => {
+    const s = load<Settings & { biome?: string }>(SETTINGS_KEY, { muted: false, shake: true, lighting: true, map: DEFAULT_MAP, name: '' });
+    if (!(s.map in { hollow: 1, furnace: 1, rift: 1 })) s.map = DEFAULT_MAP; // older saves stored a biome or a removed map
+    delete s.biome;
+    return s as Settings;
+  })(),
   best: load<Best>(BEST_KEY, { wave: 0, score: 0 }),
   lastRun: null,
-  net: { online: false, players: 0, roomId: null, error: null },
+  net: { ...offlineNet },
   setNet: (n) => set((s) => ({ net: { ...s.net, ...n } })),
+  settingsOpen: false,
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   debug: {
     show: new URLSearchParams(location.search).has('debug'),
     fps: 0,

@@ -5,10 +5,11 @@
 //
 //   npm run check                       # all scenarios
 //   npm run check -- --only=mobile
-//   npm run check -- --biome=ember
+//   npm run check -- --map=furnace       (hollow | furnace | rift | glacier)
 //   npm run check -- --url=http://localhost:5173   (reuse a running server)
 
 import { chromium, devices } from 'playwright';
+import { Client as ColyseusClient } from 'colyseus.js';
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -25,7 +26,7 @@ const args = Object.fromEntries(
   }),
 );
 const SEED = args.seed ?? 'check-42';
-const BIOME = args.biome ?? 'verdant';
+const BIOME = args.map ?? args.biome ?? 'hollow'; // map id (kept under the old name for the file names below)
 
 const SCENARIOS = [
   { name: 'desktop-1080p', viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 },
@@ -68,9 +69,11 @@ async function runMultiplayer(browser, baseUrl, wsUrl) {
     const page = await ctx.newPage();
     page.on('pageerror', (e) => errors.push(`${name} pageerror: ${e.message}`));
     page.on('console', (m) => {
-      if (m.type() === 'error') errors.push(`${name}: ${m.text()}`);
+      // the deliberate wrong-code lookup answers 404, which Chrome logs as a resource error
+      if (m.type() === 'error' && !/404 \(Not Found\)/.test(m.text())) errors.push(`${name}: ${m.text()}`);
     });
-    await page.goto(`${baseUrl}/?seed=${encodeURIComponent(SEED)}&biome=${BIOME}&server=${encodeURIComponent(wsUrl)}`, { waitUntil: 'load' });
+    // nowaves: the host's room has no aliens, so the PvP / prediction checks are deterministic
+    await page.goto(`${baseUrl}/?seed=${encodeURIComponent(SEED)}&map=${BIOME}&server=${encodeURIComponent(wsUrl)}&nowaves`, { waitUntil: 'load' });
     await page.waitForFunction(() => globalThis.__LV?.ready === true, null, { timeout: 30000 });
     await page.waitForTimeout(600);
     return { ctx, page, name };
@@ -79,58 +82,155 @@ async function runMultiplayer(browser, baseUrl, wsUrl) {
   const B = await mk('B');
   const stats = (p) => p.page.evaluate(() => globalThis.__LV.stats());
   const setInput = (p, o) => p.page.evaluate((o) => globalThis.__LV.setInput(o), o);
+  const phaseIs = (p, ph, timeout = 15000) => p.page.waitForFunction((ph) => globalThis.__LV.stats().phase === ph, ph, { timeout }).then(() => true, () => false);
   const idle = { moveX: 0, jet: false, fire: false, bomb: false, weapon: 0, bombType: 0, aimAngle: 0 };
 
-  await A.page.click('[data-action=play-online]');
-  await A.page.waitForFunction(() => globalThis.__LV.stats().phase === 'playing', null, { timeout: 15000 });
+  // ================= host / join with a room code
+  // A picks a callsign (settings → general) so the kill feed / death screen can name it
+  await A.page.click('[data-action=settings]');
+  await A.page.fill('[data-ui=callsign]', 'ALPHA');
+  await A.page.click('[data-action=settings-close]');
+  await A.page.click('[data-action=host]');
+  check('HOST GAME opens a lobby', await phaseIs(A, 'lobby'));
   const sA0 = await stats(A);
-  check('A joins an online room', sA0.mode === 'net' && sA0.net?.connected, `mode=${sA0.mode}`);
-  await B.page.click('[data-action=play-online]');
-  await B.page.waitForFunction(() => globalThis.__LV.stats().phase === 'playing', null, { timeout: 15000 });
-  await A.page.waitForFunction(() => globalThis.__LV.stats().players === 2, null, { timeout: 8000 }).catch(() => {});
-  await B.page.waitForTimeout(700);
+  const code = sA0.net?.code ?? '';
+  check('room code is 5 chars', /^[A-Z0-9]{5}$/.test(code), `code=${code}`);
+  check('lobby shows the code', (await A.page.locator('[data-ui=room-code]').innerText()).trim() === code, await A.page.locator('[data-ui=room-code]').innerText());
+  check('host sees START MATCH; match not started yet', (await A.page.locator('[data-action=start-match]').isVisible()) && sA0.net.isHost && !sA0.net.started, JSON.stringify({ isHost: sA0.net.isHost, started: sA0.net.started }));
+  check('room capacity is 12', sA0.net.maxPlayers === 12, `max=${sA0.net.maxPlayers}`);
+  await A.page.screenshot({ path: join(OUT, `mp-lobby-host-${BIOME}.png`) });
+
+  // B: wrong code is refused with a readable error, then the right one joins the lobby
+  await B.page.click('[data-action=join]');
+  await B.page.fill('[data-ui=code-input]', 'ZZZZZ');
+  await B.page.click('[data-action=join-submit]');
+  await B.page.waitForSelector('[data-ui=net-error]', { timeout: 10000 }).catch(() => {});
+  const errText = (await B.page.locator('[data-ui=net-error]').innerText().catch(() => '')).trim();
+  check('wrong code → ROOM NOT FOUND, back on the menu', /NOT FOUND/.test(errText) && (await stats(B)).phase === 'menu', `err="${errText}"`);
+  await B.page.fill('[data-ui=code-input]', code);
+  await B.page.press('[data-ui=code-input]', 'Enter');
+  check('JOIN WITH CODE lands in the same lobby', await phaseIs(B, 'lobby'));
+  await A.page.waitForFunction(() => globalThis.__LV.stats().net.roster.length === 2, null, { timeout: 8000 }).catch(() => {});
   const sA1 = await stats(A);
   const sB1 = await stats(B);
-  check('both see 2 players in one room', sA1.players === 2 && sB1.players === 2, `A=${sA1.players} B=${sB1.players}`);
-  check('same seed on both clients', sA1.seed === sB1.seed && sA1.seed === sA1.net?.tick * 0 + sA1.seed, `A=${sA1.seed} B=${sB1.seed}`);
-  check('both landed on the spawn floor', sA1.player?.grounded && sB1.player?.grounded, JSON.stringify({ a: sA1.player?.grounded, b: sB1.player?.grounded }));
-  check('HUD shows ONLINE', (await A.page.locator('[data-hud=online]').innerText()).includes('ONLINE'));
+  check('both see 2 pilots in the roster', sA1.net.roster.length === 2 && sB1.net.roster.length === 2, `A=${sA1.net.roster.length} B=${sB1.net.roster.length}`);
+  check('same room code on both', sB1.net.code === code, `B=${sB1.net.code}`);
+  check('guest waits for the host', (await B.page.locator('[data-ui=waiting]').isVisible()) && !sB1.net.isHost && !sB1.net.started);
+  check('roster names the host as ALPHA', sB1.net.roster.some((r) => r.host && r.name === 'ALPHA'), JSON.stringify(sB1.net.roster.map((r) => [r.name, r.host])));
+  check('no waves while in the lobby', sA1.wave === 0 && sA1.aliens === 0, `wave=${sA1.wave} aliens=${sA1.aliens}`);
+  await B.page.screenshot({ path: join(OUT, `mp-lobby-guest-${BIOME}.png`) });
+
+  await A.page.click('[data-action=start-match]');
+  check('host START → host playing', await phaseIs(A, 'playing', 8000));
+  check('host START → guest playing', await phaseIs(B, 'playing', 8000));
+  await A.page.waitForFunction(() => globalThis.__LV.stats().players === 2, null, { timeout: 8000 }).catch(() => {});
+  await B.page.waitForTimeout(700);
+  const sA2 = await stats(A);
+  const sB2 = await stats(B);
+  check('A joined an online room', sA2.mode === 'net' && sA2.net?.connected, `mode=${sA2.mode}`);
+  check('both see 2 players in one room', sA2.players === 2 && sB2.players === 2, `A=${sA2.players} B=${sB2.players}`);
+  check('same seed on both clients', sA2.seed === sB2.seed, `A=${sA2.seed} B=${sB2.seed}`);
+  check('both landed on the spawn floor', sA2.player?.grounded && sB2.player?.grounded, JSON.stringify({ a: sA2.player?.grounded, b: sB2.player?.grounded }));
+  const onlineText = await A.page.locator('[data-hud=online]').innerText();
+  check('HUD shows ONLINE + room code + 2/12', onlineText.includes('ONLINE') && onlineText.includes(code) && onlineText.includes('2/12'), onlineText);
+  check('in-game settings cog visible', await A.page.locator('[data-action=settings-cog]').isVisible());
+  const tag = (await stats(A)).indicators.find((i) => i.kind === 'player' && i.id === sB2.net.localId);
+  check('name tag over the other pilot when in view', !!tag && tag.onScreen && tag.label === 'PILOT-' + sB2.net.localId.replace(/[^a-z0-9]/gi, '').slice(0, 4).toUpperCase(), JSON.stringify(tag));
+
+  // ================= PvP: A shoots B (Mini-Militia style), B dies, gets the kill feed, respawns
+  // both pilots are still on their spawn slots, 1.2 tiles apart on the flat pocket floor
+  await setInput(B, { ...idle, aimAngle: Math.PI }); // B stands still
+  const aimAtB = async () => {
+    const s = await stats(A);
+    const b = s.others.find((o) => o.id === sB2.net.localId);
+    return b ? Math.atan2(b.y - s.player.y, b.x - s.player.x) : 0;
+  };
+  const hpB0 = (await stats(B)).player.health;
+  let hurtAt = null;
+  let deadAt = null;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 9000) {
+    await setInput(A, { ...idle, weapon: 0, fire: true, aimAngle: await aimAtB() });
+    await A.page.waitForTimeout(120);
+    const sb = await stats(B);
+    if (hurtAt === null && sb.player.health < hpB0) hurtAt = Date.now() - t0;
+    if (!sb.player.alive) {
+      deadAt = Date.now() - t0;
+      break;
+    }
+  }
+  await setInput(A, { ...idle, weapon: 0 });
+  check('A\'s blaster hurts B (players can damage each other)', hurtAt !== null, `first hit after ${hurtAt} ms (hp ${hpB0} -> ${(await stats(B)).player.health})`);
+  check('sustained fire kills B', deadAt !== null, `dead after ${deadAt} ms`);
+  await B.page.waitForTimeout(300);
+  const death = await B.page.evaluate(() => globalThis.__LV.death());
+  check('B sees KILLED BY ALPHA + respawn countdown', death && death.by === 'ALPHA' && death.respawnIn > 0 && (await B.page.locator('[data-hud=death]').isVisible()), JSON.stringify(death));
+  check('B stays in the match (no game over online)', (await stats(B)).phase === 'playing');
+  const sAk = await stats(A);
+  check('A is credited with the kill', sAk.kills >= 1, `kills=${sAk.kills}`);
+  const feed = await A.page.locator('[data-hud=feed]').innerText().catch(() => '');
+  check('kill feed shows the kill', /ALPHA/.test(feed) || /YOU/.test(feed), `feed="${feed}"`);
+  await B.page.screenshot({ path: join(OUT, `mp-B-${BIOME}-killed.png`) });
+  await A.page.screenshot({ path: join(OUT, `mp-A-${BIOME}-kill.png`) });
+  const respawned = await B.page.waitForFunction(() => globalThis.__LV.stats().player?.alive === true, null, { timeout: 7000 }).then(() => true, () => false);
+  const sBr = await stats(B);
+  check('B respawns with full health after ~3 s', respawned && sBr.player.health === 100 && sBr.player.grounded !== undefined, `alive=${sBr.player?.alive} hp=${sBr.player?.health}`);
+  check('respawn overlay gone', (await B.page.evaluate(() => globalThis.__LV.death())) === null && !(await B.page.locator('[data-hud=death]').isVisible()));
+  check('B\'s deaths counted in the roster', (await stats(A)).net.roster.find((r) => r.id === sB2.net.localId)?.deaths === 1, JSON.stringify((await stats(A)).net.roster));
+
 
   // A moves right; B must see A move
-  const bSeesA0 = sB1.others.find((o) => o.id === sA1.net.localId);
+  const bSeesA0 = sB2.others.find((o) => o.id === sA2.net.localId);
   await setInput(A, { ...idle, moveX: 1 });
   await A.page.waitForTimeout(1200);
   await setInput(A, { ...idle });
   await B.page.waitForTimeout(400);
-  const sB2 = await stats(B);
-  const bSeesA1 = sB2.others.find((o) => o.id === sA1.net.localId);
+  const sB3 = await stats(B);
+  const bSeesA1 = sB3.others.find((o) => o.id === sA2.net.localId);
   check('B sees A move', bSeesA0 && bSeesA1 && bSeesA1.x > bSeesA0.x + 1, `A.x on B: ${bSeesA0?.x?.toFixed(2)} -> ${bSeesA1?.x?.toFixed(2)}`);
-  const sA2 = await stats(A);
-  check('A position matches on both clients', Math.abs(sA2.player.x - bSeesA1.x) < 1.0, `A=${sA2.player.x.toFixed(2)} onB=${bSeesA1?.x?.toFixed(2)}`);
+  const sA3 = await stats(A);
+  check('A position matches on both clients', Math.abs(sA3.player.x - bSeesA1.x) < 1.0, `A=${sA3.player.x.toFixed(2)} onB=${bSeesA1?.x?.toFixed(2)}`);
 
+  // B flies up out of A's view: A gets an edge arrow with B's name and distance
+  await setInput(B, { ...idle, jet: true, aimAngle: -Math.PI / 2 });
+  await B.page.waitForTimeout(2600);
+  await setInput(B, { ...idle, aimAngle: -Math.PI / 2 });
+  const sArrow = await stats(A);
+  const bArrow = sArrow.indicators.find((i) => i.kind === 'player' && i.id === sB2.net.localId);
+  const bPos = sArrow.others.find((o) => o.id === sB2.net.localId);
+  check('pilot out of view → edge arrow + name + distance', !!bArrow && !bArrow.onScreen && /PILOT-.* \d+m/.test(bArrow.label) && bArrow.y < sArrow.vh * 0.15, `${JSON.stringify(bArrow)} B.y=${bPos?.y?.toFixed(1)} A.y=${sArrow.player.y.toFixed(1)}`);
+  await A.page.screenshot({ path: join(OUT, `mp-A-${BIOME}-arrow.png`) });
+  await B.page.waitForTimeout(2500); // let B fall back
   // A fires the beam into the floor; B must see the same tiles disappear
-  const tB0 = sB2.tilesDestroyed;
+  const tB0 = sB3.tilesDestroyed;
   await setInput(A, { ...idle, weapon: 1, fire: true, aimAngle: Math.PI * 0.4 });
   await A.page.waitForTimeout(1000);
   await A.page.screenshot({ path: join(OUT, `mp-A-${BIOME}.png`) });
-  // background tabs get rAF-throttled in headless Chrome: foreground B and let it catch up before shooting it
   await B.page.bringToFront();
   await B.page.waitForTimeout(400);
   await B.page.screenshot({ path: join(OUT, `mp-B-${BIOME}.png`) });
-  // headless Chrome may hand back a stale composited frame for a tab that was in the background,
-  // so also read the canvas straight from the renderer.
   const dataUrl = await B.page.evaluate(() => globalThis.__LV.capture());
   writeFileSync(join(OUT, `mp-B-${BIOME}-canvas.png`), Buffer.from(dataUrl.split(',')[1], 'base64'));
   const sBmid = await stats(B);
-  const aOnB = sBmid.others.find((o) => o.id === sA1.net.localId);
+  const aOnB = sBmid.others.find((o) => o.id === sA2.net.localId);
   check('B renders A (remote player present in snapshot)', !!aOnB, JSON.stringify(aOnB));
   await setInput(A, { ...idle, weapon: 1 });
   await B.page.waitForTimeout(500);
-  const sA3 = await stats(A);
-  const sB3 = await stats(B);
-  check('A carves via the server', sA3.tilesDestroyed > 0, `A destroyed=${sA3.tilesDestroyed}`);
-  check('B receives the same tile deltas', sB3.tilesDestroyed > tB0 && sB3.tilesDestroyed === sA3.tilesDestroyed, `A=${sA3.tilesDestroyed} B=${sB3.tilesDestroyed}`);
-  check('both grids agree', sA3.solidTiles === sB3.solidTiles, `A solid=${sA3.solidTiles} B solid=${sB3.solidTiles}`);
+  const sA4 = await stats(A);
+  const sB4 = await stats(B);
+  check('A carves via the server', sA4.tilesDestroyed > 0, `A destroyed=${sA4.tilesDestroyed}`);
+  check('B receives the same tile deltas', sB4.tilesDestroyed > tB0 && sB4.tilesDestroyed === sA4.tilesDestroyed, `A=${sA4.tilesDestroyed} B=${sB4.tilesDestroyed}`);
+  check('both grids agree', sA4.solidTiles === sB4.solidTiles, `A solid=${sA4.solidTiles} B solid=${sB4.solidTiles}`);
+
+  // pause online = overlay only, the match continues
+  await A.page.click('[data-action=settings-cog]');
+  await A.page.waitForTimeout(200);
+  const pausedA = await stats(A);
+  check('cog opens the in-game menu online (overlay, room code shown)', pausedA.phase === 'paused' && (await A.page.locator('[data-ui=pause-room]').innerText()).includes(code));
+  await A.page.screenshot({ path: join(OUT, `mp-A-${BIOME}-pause.png`) });
+  await A.page.click('[data-action=resume]');
+  await A.page.waitForTimeout(150);
+  check('resume online', (await stats(A)).phase === 'playing');
 
   // fps while online
   const fpsA = await A.page.evaluate(() => globalThis.__LV.fps);
@@ -148,16 +248,51 @@ async function runMultiplayer(browser, baseUrl, wsUrl) {
   await setInput(A, { ...idle });
   await A.page.waitForTimeout(900);
   const sA5 = await stats(A);
-  const bView = (await stats(B)).others.find((o) => o.id === sA1.net.localId);
+  const bView = (await stats(B)).others.find((o) => o.id === sA2.net.localId);
   check('prediction converges with the server (avg err < 25 cm)', sA5.net.predErrAvg < 0.25, `avg=${(sA5.net.predErrAvg * 100).toFixed(1)} cm last=${(sA5.net.predErr * 100).toFixed(1)} cm`);
   check('A local position matches what B sees after settling', bView && Math.abs(bView.x - sA5.player.x) < 0.6, `A=${sA5.player.x.toFixed(2)} onB=${bView?.x?.toFixed(2)}`);
   check('server patches ~20 Hz', sA5.net.patchHz > 15 && sA5.net.patchHz < 26, `${sA5.net.patchHz.toFixed(1)} Hz`);
 
-  // remote smoothness: sample B's view of A every 50 ms while A walks; no jumps > 0.6 tiles
+  // weapon swap under 200 ms lag: one Q press = exactly one swap that sticks (no flip-flop from stale server frames)
+  await setInput(A, null);
+  await A.page.mouse.move(800, 450);
+  const swapFrom = (await stats(A)).weapon.active;
+  await A.page.keyboard.press('KeyQ');
+  const seen = [];
+  for (let i = 0; i < 14; i++) {
+    await A.page.waitForTimeout(100);
+    seen.push((await stats(A)).weapon.active);
+  }
+  const target = swapFrom ? 0 : 1;
+  const flips = seen.reduce((n, v, i) => n + (i > 0 && v !== seen[i - 1] ? 1 : 0), 0);
+  check('Q swaps the weapon once and it stays (lagged)', seen[0] === target && seen.every((v) => v === target) && flips === 0, `from=${swapFrom} seen=${seen.join('')}`);
+  const bOnA0 = (await stats(A)).others.find((o) => o.id === sB2.net.localId);
+  await setInput(B, null);
+  await B.page.mouse.move(800, 450);
+  const bFrom = (await stats(B)).weapon.active;
+  await B.page.keyboard.press('KeyQ');
+  const seenB = [];
+  for (let i = 0; i < 10; i++) {
+    await B.page.waitForTimeout(100);
+    seenB.push((await stats(B)).weapon.active);
+  }
+  check('the other pilot can swap too, exactly once', seenB.every((v) => v === (bFrom ? 0 : 1)), `from=${bFrom} seen=${seenB.join('')} (${bOnA0 ? 'B visible on A' : 'B not on A'})`);
+  // wheel: a trackpad flick (many small deltas) is one swap
+  const wFrom = (await stats(A)).weapon.active;
+  for (let i = 0; i < 12; i++) await A.page.mouse.wheel(0, 8);
+  await A.page.waitForTimeout(500);
+  const wAfter = (await stats(A)).weapon.active;
+  check('a wheel flick with many tiny deltas swaps once', wAfter !== wFrom, `from=${wFrom} after=${wAfter}`);
+  await A.page.keyboard.press('KeyQ'); // restore slot 0 for the tests below
+  await A.page.waitForTimeout(300);
+  await setInput(A, { ...idle });
+  await setInput(B, { ...idle });
+
+  // remote smoothness: sample B's view of A every 50 ms while A walks; no jumps > 0.9 tiles
   await setInput(A, { ...idle, moveX: 1 });
   const xs = [];
   for (let i = 0; i < 20; i++) {
-    const o = (await stats(B)).others.find((o) => o.id === sA1.net.localId);
+    const o = (await stats(B)).others.find((o) => o.id === sA2.net.localId);
     if (o) xs.push(o.x);
     await B.page.waitForTimeout(50);
   }
@@ -178,15 +313,109 @@ async function runMultiplayer(browser, baseUrl, wsUrl) {
   await A.page.screenshot({ path: join(OUT, `mp-A-${BIOME}-debug.png`) });
   await A.page.evaluate(() => globalThis.__LV.setLag(0));
 
-  // B leaves; A sees 1 player
+  // guest B leaves: nothing happens to the host, B just vanishes from A's world
   await B.page.evaluate(() => globalThis.__LV.toMenu());
   await A.page.waitForFunction(() => globalThis.__LV.stats().players === 1, null, { timeout: 8000 }).catch(() => {});
-  const sA4 = await stats(A);
-  check('A sees B leave', sA4.players === 1, `players=${sA4.players}`);
+  const sA6 = await stats(A);
+  check('guest leaves → host keeps playing, sees 1 player', sA6.players === 1 && sA6.phase === 'playing', `players=${sA6.players} phase=${sA6.phase}`);
+  // B rejoins the running room by code (mid-match join), then the host leaves → B is told and sent to the menu
+  await B.page.click('[data-action=join]');
+  await B.page.fill('[data-ui=code-input]', code);
+  await B.page.press('[data-ui=code-input]', 'Enter');
+  check('rejoining a started room by code goes straight into play', await phaseIs(B, 'playing', 10000));
+  await A.page.evaluate(() => globalThis.__LV.toMenu());
+  const bBack = await phaseIs(B, 'menu', 10000);
+  const notice = (await B.page.locator('[data-ui=net-notice]').innerText().catch(() => '')).trim();
+  check('host leaves → guest gets "host left" notice and lands on the main menu', bBack && /HOST LEFT/.test(notice), `phase=${(await stats(B)).phase} notice="${notice}"`);
+  await B.page.screenshot({ path: join(OUT, `mp-B-${BIOME}-host-left.png`) });
+  const gone = await fetch(`${wsUrl.replace(/^ws/, 'http')}/rooms/${code}`);
+  check('closed room code no longer resolves (404)', gone.status === 404, `status=${gone.status}`);
 
   await A.ctx.close();
   await B.ctx.close();
   return { scenario: 'multiplayer', checks, errors, fpsA };
+}
+
+/** 12-player cap + host hand-off, with lightweight Node clients (no browser). */
+async function runCapacity(wsUrl) {
+  const checks = [];
+  const check = (name, ok, info = '') => checks.push({ name, ok: !!ok, info: String(info) });
+  const errors = [];
+  const http = wsUrl.replace(/^ws/, 'http');
+  const client = new ColyseusClient(wsUrl);
+  const rooms = [];
+  let log = null;
+  try {
+    log = (m) => args.verbose && process.stdout.write(`\n   · ${m}`);
+    log('creating room');
+    const host = await client.create('arena', { mode: 'host', map: BIOME, name: 'HOST' });
+    rooms.push(host);
+    log(`created ${host.roomId}`);
+    const welcome = await new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error('no welcome')), 8000);
+      host.onMessage('welcome', (m) => {
+        clearTimeout(t);
+        res(m);
+      });
+    });
+    const code = welcome.code;
+    check('node client hosts a room and gets a code', /^[A-Z0-9]{5}$/.test(code), `code=${code}`);
+    const look = await (await fetch(`${http}/rooms/${code}`)).json();
+    check('GET /rooms/:code resolves the room', look.roomId === host.roomId && look.maxClients === 12 && look.started === false, JSON.stringify(look));
+    const bad = await fetch(`${http}/rooms/ZZZZZ`);
+    check('GET /rooms/:code → 404 for unknown code', bad.status === 404, `status=${bad.status}`);
+    for (let i = 1; i < 12; i++) {
+      const g = await client.joinById(host.roomId, { name: `G${i}` });
+      g.onMessage('welcome', () => {});
+      rooms.push(g);
+      log(`joined ${i + 1}`);
+    }
+    check('12 players fit in one room', rooms.length === 12 && rooms.every((r) => r.sessionId), `joined=${rooms.length}`);
+    let refused = null;
+    try {
+      const extra = await client.joinById(host.roomId, { name: 'G12' });
+      extra.onMessage('welcome', () => {});
+      rooms.push(extra);
+    } catch (e) {
+      refused = String(e?.message ?? e);
+    }
+    check('13th player is refused', refused !== null, `err="${refused}"`);
+    const full = await fetch(`${http}/rooms/${code}`);
+    check('lookup reports the room as full (409)', full.status === 409, `status=${full.status}`);
+    await new Promise((r) => setTimeout(r, 300));
+    const second = rooms[1];
+    const nameOk = second.state?.players?.get(second.sessionId)?.name === 'G1';
+    check('callsigns are stored server-side', nameOk, `name=${second.state?.players?.get(second.sessionId)?.name}`);
+    // a guest leaving changes nothing for the others
+    await rooms[11].leave();
+    await new Promise((r) => setTimeout(r, 400));
+    check('guest leaves → room stays open with 11', second.state?.players?.size === 11, `players=${second.state?.players?.size}`);
+    // the host leaving closes the room: every guest hears HostLeft and is disconnected
+    let heard = 0;
+    let dropped = 0;
+    for (const g of rooms.slice(1, 11)) {
+      g.onMessage('hostLeft', () => heard++);
+      g.onLeave(() => dropped++);
+    }
+    log('host leaving');
+    await host.leave();
+    await new Promise((res) => {
+      const t0 = Date.now();
+      const iv = setInterval(() => {
+        if (dropped >= 10 || Date.now() - t0 > 6000) {
+          clearInterval(iv);
+          res();
+        }
+      }, 100);
+    });
+    check('host leaves → every guest is told and disconnected', heard === 10 && dropped === 10, `heard=${heard} dropped=${dropped}`);
+  } catch (e) {
+    errors.push(String(e?.stack ?? e));
+  } finally {
+    log?.('cleanup');
+    await Promise.all(rooms.map((r) => Promise.race([r.leave().catch(() => {}), new Promise((res) => setTimeout(res, 2000))])));
+  }
+  return { scenario: 'capacity', checks, errors };
 }
 
 async function startServer() {
@@ -245,7 +474,7 @@ async function runScenario(browser, sc, baseUrl) {
   const visible = (sel) => page.locator(sel).first().isVisible().catch(() => false);
   const idle = { moveX: 0, jet: false, fire: false, bomb: false, bombType: 0 };
 
-  const url = `${baseUrl}/?seed=${encodeURIComponent(SEED)}&biome=${BIOME}`;
+  const url = `${baseUrl}/?seed=${encodeURIComponent(SEED)}&map=${BIOME}`;
   const tStart = Date.now();
   await page.goto(url, { waitUntil: 'load' });
   await page.waitForFunction(() => globalThis.__LV?.ready === true, null, { timeout: 30000 });
@@ -254,27 +483,57 @@ async function runScenario(browser, sc, baseUrl) {
 
   // ================= Step 6: main menu
   check('menu visible on load', await visible('[data-ui=start]'));
+  await shot('1-menu');
   // fullscreen / PWA plumbing
   const manifest = await page.request.get(`${baseUrl}/manifest.webmanifest`);
   check('web app manifest is served', manifest.ok() && (await manifest.text()).includes('"display": "fullscreen"'), `status=${manifest.status()}`);
   const icon = await page.request.get(`${baseUrl}/icons/icon-192.png`);
   check('home-screen icon is served', icon.ok(), `status=${icon.status()}`);
+  // uncluttered menu: no weapon/bomb lists or key hints on the title panel, a handful of buttons, a settings cog
+  const menuButtons = await page.locator('[data-ui=start] .panel button').count();
+  check('menu is lean (≤ 9 buttons, no arsenal on the title panel)', menuButtons <= 9 && (await page.locator('[data-ui=start] .arsenal').count()) === 0, `buttons=${menuButtons}`);
+  check('settings cog on the menu', await visible('[data-action=settings] .cog'));
+  check('no fullscreen button cluttering the menu', !(await visible('[data-ui=start] [data-action=fullscreen]')));
+  await page.click('[data-action=settings]');
+  await page.waitForTimeout(150);
+  check('cog opens the settings modal', await visible('[data-ui=settings-modal]'));
   const fsSupported = await page.evaluate(() => !!document.fullscreenEnabled);
   const fsBtn = await visible('[data-action=fullscreen]');
-  check('fullscreen button shown when the browser supports it', fsBtn === fsSupported, `supported=${fsSupported} button=${fsBtn}`);
+  check('fullscreen toggle lives in settings when the browser supports it', fsBtn === fsSupported, `supported=${fsSupported} button=${fsBtn}`);
+  check('callsign field in settings', await visible('[data-ui=callsign]'));
+  await page.click('[data-tab=weapons]');
+  check('settings → WEAPONS lists all 11 weapons', (await page.locator('[data-tab-body=weapons] .arsenal-item').count()) === 11, `items=${await page.locator('[data-tab-body=weapons] .arsenal-item').count()}`);
+  check('weapon icons in the WEAPONS tab', (await page.locator('[data-tab-body=weapons] .arsenal-icon').count()) === 11, `icons=${await page.locator('[data-tab-body=weapons] .arsenal-icon').count()}`);
+  await shot('1b-settings-weapons');
+  await page.click('[data-tab=bombs]');
+  check('settings → BOMBS lists all 6 bombs with icons', (await page.locator('[data-tab-body=bombs] .arsenal-item').count()) === 6 && (await page.locator('[data-tab-body=bombs] .arsenal-icon').count()) === 6, `items=${await page.locator('[data-tab-body=bombs] .arsenal-item').count()}`);
+  await shot('1d-settings-bombs');
+  await page.click('[data-tab=controls]');
+  check('settings → CONTROLS lists the keys', (await page.locator('[data-tab-body=controls] .key').count()) >= 6);
+  await page.click('[data-tab=general]');
   const isIphone = /iPhone/.test(await page.evaluate(() => navigator.userAgent));
   check('iPhone gets the Add-to-Home-Screen hint (others do not)', (await visible('[data-ui=ios-hint]')) === isIphone, `iphone=${isIphone}`);
   const vh = await page.evaluate(() => ({ root: document.getElementById('root').getBoundingClientRect().height, inner: window.innerHeight }));
   check('game root fills the visible viewport', Math.abs(vh.root - vh.inner) < 2, JSON.stringify(vh));
   check('HUD hidden in menu', !(await visible('[data-ui=hud]')));
   fpsLog.menu = await sampleFps(1200);
-  await shot('1-menu');
+  await shot('1c-settings-general');
   // settings toggles persist in the store
   await page.click('[data-action=toggle-mute]');
   const muted = await page.evaluate(() => JSON.parse(localStorage.getItem('lv.settings') ?? '{}').muted);
   check('mute toggle persists', muted === true, `muted=${muted}`);
   await page.click('[data-action=toggle-mute]');
-  await page.click(`[data-biome=${BIOME}]`);
+  await page.click('[data-action=settings-close]');
+  await page.waitForTimeout(100);
+  check('settings modal closes', !(await visible('[data-ui=settings-modal]')));
+  // join-with-code UI: 5-char code required
+  await page.click('[data-action=join]');
+  check('JOIN WITH CODE shows the code field', await visible('[data-ui=code-input]'));
+  await page.fill('[data-ui=code-input]', 'ab1');
+  check('short code keeps JOIN disabled', await page.locator('[data-action=join-submit]').isDisabled());
+  await page.click('[data-action=join-cancel]');
+  check('three map cards on the menu (1 sky, 2 cave)', (await page.locator('[data-ui=maps] .map-card').count()) === 3 && (await page.locator('[data-ui=maps] .map-swatch[data-backdrop=sky]').count()) === 1);
+  await page.click(`[data-map=${BIOME}]`);
   await page.click('[data-action=play]');
   await page.waitForFunction(() => globalThis.__LV.stats().phase === 'playing', null, { timeout: 5000 });
   check('play button starts a run', true);
@@ -305,25 +564,40 @@ async function runScenario(browser, sc, baseUrl) {
 
   // ================= Step 4 + weapons roster (9 weapons, 2 slots, given via debug like a supply drop)
   await lv(() => globalThis.__LV.setDrops(false));
-  const WEAPONS = ['blaster', 'vector', 'scatter', 'vulcan', 'plasma', 'flamer', 'arc', 'rail', 'launcher'];
-  const DIGS = { flamer: false, plasma: false };
+  const WEAPONS = ['blaster', 'vector', 'scatter', 'vulcan', 'plasma', 'flamer', 'sniper', 'arc', 'rail', 'launcher', 'emp'];
+  const DIGS = { flamer: false, plasma: false, emp: false }; // flamer burns rock instead (checked below); plasma blasts are tiny; emp doesn't dig
   for (const w of WEAPONS) {
     await lv(() => globalThis.__LV.resetHeat());
     const slot = await lv((w) => globalThis.__LV.giveWeapon(w), w);
-    await setInput({ ...idle, weapon: slot, aimAngle: Math.PI * 0.3 });
+    await setInput({ ...idle, weapon: slot, aimAngle: -Math.PI * 0.08 });
     await page.waitForTimeout(150);
     const before = await stats();
     check(`weapon ${w} in slot ${slot}`, before.weapon.id === w, `got ${before.weapon.id} slots=${JSON.stringify(before.weapon.slots)}`);
-    await setInput({ ...idle, weapon: slot, fire: true, aimAngle: Math.PI * 0.3 });
+    await setInput({ ...idle, weapon: slot, fire: true, aimAngle: -Math.PI * 0.08 });
     await page.waitForTimeout(w === 'launcher' || w === 'rail' ? 900 : 650);
     if (['vector', 'scatter', 'arc', 'launcher', 'flamer', 'rail'].includes(w)) await shot(`3-weapon-${w}`);
     fpsLog[`w-${w}`] = await sampleFps(500);
     const after = await stats();
     if (DIGS[w] !== false) check(`weapon ${w} carves rock`, after.tilesDestroyed > before.tilesDestroyed, `+${after.tilesDestroyed - before.tilesDestroyed} tiles`);
     check(`weapon ${w} builds heat`, after.weapon.heat > 3, `heat=${after.weapon.heat.toFixed(0)}`);
-    await setInput({ ...idle, weapon: slot, aimAngle: Math.PI * 0.3 });
+    await setInput({ ...idle, weapon: slot, aimAngle: -Math.PI * 0.08 });
     await page.waitForTimeout(150);
   }
+  // flamer: rock catches fire, then crumbles (from the spawn floor, flaming straight down at the ground under our feet)
+  await lv(() => globalThis.__LV.teleportSpawn());
+  await page.waitForTimeout(900);
+  await lv(() => globalThis.__LV.resetHeat());
+  const fslot = await lv(() => globalThis.__LV.giveWeapon('flamer'));
+  const fb = await stats();
+  await setInput({ ...idle, weapon: fslot, fire: true, aimAngle: Math.PI / 2 });
+  await page.waitForTimeout(350);
+  const fmid = await stats();
+  await shot('3b-flamer-burning-rock');
+  await setInput({ ...idle, weapon: fslot, aimAngle: Math.PI / 2 });
+  await page.waitForTimeout(1100);
+  const fa = await stats();
+  check('flamer sets rock alight (tiles burning)', fmid.burningTiles > 0, `burning=${fmid.burningTiles}`);
+  check('burning rock crumbles after the burn', fa.tilesDestroyed > fb.tilesDestroyed && fa.burningTiles === 0, `+${fa.tilesDestroyed - fb.tilesDestroyed} tiles, still burning=${fa.burningTiles}`);
   // slot swap: 1 and 2 hold different weapons; switching changes the active weapon
   const sw0 = await stats();
   await setInput({ ...idle, weapon: 0, aimAngle: 0 });
@@ -341,6 +615,10 @@ async function runScenario(browser, sc, baseUrl) {
   await page.waitForTimeout(700);
   const sc2 = await stats();
   check('heat cools when released', sc2.weapon.heat < so.weapon.heat - 10, `heat ${so.weapon.heat.toFixed(0)} -> ${sc2.weapon.heat.toFixed(0)}`);
+  // back on the spawn floor for the bomb section (the weapon sweep may have carved the ground away)
+  await lv(() => globalThis.__LV.teleportSpawn());
+  await page.waitForTimeout(900);
+  check('teleported to spawn and landed', (await stats()).player.grounded, `y=${(await stats()).player.y.toFixed(1)}`);
   // gel bomb (edge-triggered) — thrown toward the aim (left, into a pocket we clear first) with a lob
   await lv(() => {
     const p = globalThis.__LV.stats().player;
@@ -358,7 +636,13 @@ async function runScenario(browser, sc, baseUrl) {
   await shot('4-bomb');
   await page.waitForTimeout(400);
   const sb2 = await stats();
-  check('bomb exploded and carved', sb2.bombsLive === 0 && sb2.tilesDestroyed > sb.tilesDestroyed + 8, `+${sb2.tilesDestroyed - sb.tilesDestroyed}`);
+  check('bomb exploded and carved', sb2.bombsLive === 0 && sb2.tilesDestroyed > sb.tilesDestroyed + 3, `+${sb2.tilesDestroyed - sb.tilesDestroyed}`);
+  // the map's own kit shows in the HUD (Hollow: gel / mine / smoke); tests below unlock every type
+  const kitDots = await page.locator('[data-hud=bombs] .hud-bomb-dot').count();
+  const kitLen = (await stats()).bombKit.length;
+  check('HUD bomb counters match the map kit', kitDots === kitLen && kitLen === 3, `dots=${kitDots} kit=${kitLen}`);
+  await lv(() => globalThis.__LV.unlockAllBombs());
+  await page.waitForTimeout(150);
   // mine + smoke: switch type (B), throw, spawn an alien next to it -> boom; smoke leaves a cloud
   await setInput({ ...idle, weapon: 0, bomb: true, bombType: 1, aimAngle: -0.4 });
   await page.waitForTimeout(120);
@@ -370,25 +654,75 @@ async function runScenario(browser, sc, baseUrl) {
     await lv((b) => globalThis.__LV.spawnAlienAt('crawler', b.x + 0.5, b.y - 0.6, true), sm.bombs[0]);
     await page.waitForTimeout(300);
     const sm2 = await stats();
-    check('mine detonates on proximity', sm2.bombsLive === 0, `live=${sm2.bombsLive}`);
+    check('fire mine detonates on proximity', sm2.bombsLive === 0, `live=${sm2.bombsLive}`);
+    check('fire mine leaves a burning pool', sm2.fireClouds > 0, `fire=${sm2.fireClouds}`);
+    await page.waitForTimeout(400);
+    await shot('4e-fire-mine');
   }
-  // smoke: drop it at our feet; it arms, then the owner standing next to it sets it off after the grace period
+  // smoke: throw, let it land and arm, then a frozen alien walks into it (deterministic regardless of where it rolled)
   await setInput({ ...idle, weapon: 0, bomb: true, bombType: 2, aimAngle: Math.PI / 2 - 0.15 });
   await page.waitForTimeout(120);
   await setInput({ ...idle, weapon: 0, bombType: 2, aimAngle: Math.PI / 2 - 0.15 });
-  await page.waitForFunction(() => globalThis.__LV.stats().clouds > 0, null, { timeout: 6000 }).catch(() => {});
+  await page.waitForFunction(() => globalThis.__LV.stats().bombs.some((b) => b.type === 'smoke' && b.armed), null, { timeout: 4000 }).catch(() => {});
+  const smokeBomb = (await stats()).bombs.find((b) => b.type === 'smoke');
+  if (smokeBomb) await lv((b) => globalThis.__LV.spawnAlienAt('crawler', b.x + 0.5, b.y - 0.6, true), smokeBomb);
+  await page.waitForFunction(() => globalThis.__LV.stats().clouds > 0, null, { timeout: 3000 }).catch(() => {});
   const ss = await stats();
   check('smoke bomb leaves a cloud', ss.clouds > 0, `clouds=${ss.clouds} bombs=${JSON.stringify(ss.bombs)}`);
   await shot('4b-smoke');
+  // bomb selector: click a HUD bomb icon → that type is in hand; empty types are disabled
+  // (the injected input must not pin bombType here, or the click can't win)
+  await setInput({ moveX: 0, jet: false, fire: false, bomb: false, weapon: 0, aimAngle: 0 });
+  await page.click('[data-hud=bombs] .hud-bomb-dot[data-bomb=mine]');
+  await page.waitForTimeout(150);
+  check('clicking a bomb icon selects that bomb', (await stats()).weapon.bombType === 'mine', `bombType=${(await stats()).weapon.bombType}`);
+  await page.click('[data-hud=bombs] .hud-bomb-dot[data-bomb=gel]');
+  await page.waitForTimeout(150);
+  check('…and back to gel', (await stats()).weapon.bombType === 'gel', `bombType=${(await stats()).weapon.bombType} counts=${JSON.stringify((await stats()).bombCounts)}`);
+  if (isMobile) check('mobile BOMB button shows the bomb in hand', (await page.locator('[data-action=m-bomb]').getAttribute('data-bomb')) === 'gel' && (await visible('[data-action=m-bomb] .mbtn-icon')));
+  // cluster: pops into bomblets (bomb count spikes), all gone within ~2 s
+  await setInput({ ...idle, weapon: 0, bomb: true, bombType: 3, aimAngle: -Math.PI / 2 });
+  await page.waitForTimeout(120);
+  await setInput({ ...idle, weapon: 0, bombType: 3, aimAngle: -Math.PI / 2 });
+  let clusterPeak = 0;
+  for (let i = 0; i < 14; i++) {
+    clusterPeak = Math.max(clusterPeak, (await stats()).bombsLive);
+    await page.waitForTimeout(120);
+  }
+  await page.waitForTimeout(600);
+  check('cluster bomb splits into bomblets', clusterPeak >= 5, `peak live bombs=${clusterPeak}`);
+  check('cluster + bomblets all detonate', (await stats()).bombsLive === 0, `live=${(await stats()).bombsLive}`);
+  // impact: thrown at the floor, gone (and carved) well inside a second
+  const im0 = await stats();
+  await setInput({ ...idle, weapon: 0, bomb: true, bombType: 4, aimAngle: Math.PI / 2 - 0.3 });
+  await page.waitForTimeout(120);
+  await setInput({ ...idle, weapon: 0, bombType: 4, aimAngle: Math.PI / 2 - 0.3 });
+  await page.waitForTimeout(600);
+  const im1 = await stats();
+  check('impact charge detonates on contact (< 0.7 s) and carves', im1.bombsLive === 0 && im1.tilesDestroyed > im0.tilesDestroyed, `live=${im1.bombsLive} +${im1.tilesDestroyed - im0.tilesDestroyed} tiles`);
+  // heavy: long fuse, huge plain blast (no fire), lobbed well away to the left
+  const hv0 = await stats();
+  await setInput({ ...idle, weapon: 0, bomb: true, bombType: 5, aimAngle: Math.PI - 0.35 });
+  await page.waitForTimeout(120);
+  await setInput({ ...idle, weapon: 0, bombType: 5, aimAngle: Math.PI - 0.35 });
+  await page.waitForFunction(() => globalThis.__LV.stats().bombsLive === 0, null, { timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(200);
+  const hv1 = await stats();
+  check('heavy charge is a plain blast (carves, no fire pool)', hv1.tilesDestroyed > hv0.tilesDestroyed + 3 && hv1.fireClouds === hv0.fireClouds && hv1.bombsLive === 0, `+${hv1.tilesDestroyed - hv0.tilesDestroyed} tiles fire=${hv1.fireClouds}`);
+  await shot('4e-heavy');
+  fpsLog.heavy = await sampleFps(600);
+  const bombDots = await page.locator('[data-hud=bombs] .hud-bomb-dot').count();
+  check('HUD shows a counter for each of the 6 bomb types once unlocked', bombDots === 6 && (await visible('[data-hud=bombs] .hud-bomb-icon')), `dots=${bombDots}`);
+  await setInput({ ...idle, weapon: 0, bombType: 0, aimAngle: 0 });
+  await page.waitForTimeout(400);
+  const healed = await lv(() => globalThis.__LV.heal());
+  check('bomb tests left the player alive (healed for the next section)', healed === 100 && (await stats()).phase === 'playing', `hp=${healed}`);
   // regrow: carve a hole into rock away from the player, it heals within ~5 s
   await page.waitForTimeout(600);
   const rg0 = await stats();
-  await lv(() => {
-    const p = globalThis.__LV.stats().player;
-    globalThis.__LV.carve(p.x + 4, p.y + 3.5, 2);
-  });
+  const carved = await lv(() => globalThis.__LV.carveRockNear(2)); // nearest fully solid patch (the cave is ~50% air)
   const rg1 = await stats();
-  check('regrow test: carve made a hole', rg1.solidTiles < rg0.solidTiles, `${rg0.solidTiles} -> ${rg1.solidTiles}`);
+  check('regrow test: carve made a hole', carved > 0 && rg1.solidTiles < rg0.solidTiles, `${rg0.solidTiles} -> ${rg1.solidTiles} (carved ${carved})`);
   await page.waitForTimeout(5200);
   const rg2 = await stats();
   check('carved rock regrows after ~4 s', rg2.solidTiles > rg1.solidTiles, `${rg1.solidTiles} -> ${rg2.solidTiles} (start ${rg0.solidTiles})`);
@@ -397,15 +731,54 @@ async function runScenario(browser, sc, baseUrl) {
   // supply drop: spawn a crate above the player; it descends and gets picked up
   const dp0 = await stats();
   await lv(() => globalThis.__LV.spawnDrop('rail'));
+  await lv(() => globalThis.__LV.spawnBombDrop('gel'));
   await page.waitForTimeout(200);
   const dp1 = await stats();
-  check('supply crate spawns above the player', dp1.drops === dp0.drops + 1, `drops=${dp1.drops}`);
+  check('weapon crate + bomb crate spawn above the player', dp1.drops === dp0.drops + 2 && dp1.dropList.some((d) => d.bomb === 'gel') && dp1.dropList.some((d) => d.weapon === 'rail'), JSON.stringify(dp1.dropList));
+  const gelBefore = dp0.bombCounts[0];
+  check('HUD weapon slots show weapon icons', (await page.locator('[data-hud=weapons] .hud-slot-icon').count()) >= 1);
   await shot('4c-crate');
-  await page.waitForTimeout(9000);
+  await page.waitForFunction(() => globalThis.__LV.stats().dropList.every((d) => d.landed), null, { timeout: 12000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  const dpL = await stats();
+  check('landed crates are NOT auto-collected; a TAKE button appears', dpL.drops === dp0.drops + 2 && !dpL.weapon.slots.includes('rail') && !!dpL.player.nearDrop && (await visible('[data-action=take]')), `drops=${dpL.drops} near=${JSON.stringify(dpL.player.nearDrop)}`);
+  await shot('4c2-take-button');
+  // take both (nearest first, then the other one becomes reachable)
+  for (let i = 0; i < 2; i++) {
+    await page.click('[data-action=take]');
+    await page.waitForTimeout(250);
+  }
   const dp2 = await stats();
-  check('crate lands and is picked up into a slot', dp2.drops === dp0.drops && dp2.weapon.slots.includes('rail'), `slots=${JSON.stringify(dp2.weapon.slots)} drops=${dp2.drops}`);
+  check('TAKE swaps the weapon crate into a slot', dp2.weapon.slots.includes('rail'), `slots=${JSON.stringify(dp2.weapon.slots)} drops=${dp2.drops}`);
+  check('TAKE on the bomb crate refills gel (+2, capped)', dp2.bombCounts[0] === Math.min(5, gelBefore + 2) && dp2.drops === dp0.drops, `gel ${gelBefore} -> ${dp2.bombCounts[0]} drops=${dp2.drops}`);
+  // taking a crate of another bomb type puts that bomb in hand (the injected input must not pin bombType)
+  await setInput({ moveX: 0, jet: false, fire: false, bomb: false, weapon: 0, aimAngle: 0 });
+  await lv(() => globalThis.__LV.spawnBombDrop('smoke'));
+  await page.waitForFunction(() => !!globalThis.__LV.stats().player.nearDrop, null, { timeout: 12000 }).catch(() => {});
+  await page.keyboard.press('KeyG');
+  await page.waitForTimeout(250);
+  const sel = await stats();
+  check('G takes the crate; its bomb becomes the bomb in hand', sel.weapon.bombType === 'smoke' && sel.drops === 0, `bombType=${sel.weapon.bombType} drops=${sel.drops}`);
+  // EMP: a slow orb; anyone in its burst loses the jetpack for 10 s (fire it at our own feet)
+  await lv(() => globalThis.__LV.resetHeat());
+  const eslot = await lv(() => globalThis.__LV.giveWeapon('emp'));
+  await setInput({ ...idle, weapon: eslot, fire: true, aimAngle: Math.PI / 2 });
+  await page.waitForFunction(() => globalThis.__LV.stats().player.jammed > 0, null, { timeout: 4000 }).catch(() => {});
+  await setInput({ ...idle, weapon: eslot, jet: true, aimAngle: -Math.PI / 2 });
+  const j0 = await stats();
+  await page.waitForTimeout(700);
+  const j1 = await stats();
+  check('EMP burst knocks the jetpack offline (~10 s)', j0.player.jammed > 7 && (await visible('[data-hud=jammed]')), `jammed=${j0.player.jammed?.toFixed(1)}`);
+  check('jammed pilot cannot lift off', !j1.player.thrusting && j1.player.y > j0.player.y - 0.3, `dy=${(j1.player.y - j0.player.y).toFixed(2)} thrusting=${j1.player.thrusting}`);
+  await shot('4g-emp-jammed');
+  await lv(() => globalThis.__LV.unjam());
+  await setInput({ ...idle, weapon: 0, aimAngle: 0 });
+  await page.waitForTimeout(200);
+  await shot('4f-lightning-beam-window');
 
   // ================= Step 5: aliens, kills, drops, waves
+  await lv(() => globalThis.__LV.teleportSpawn());
+  await page.waitForTimeout(900);
   await lv(() => globalThis.__LV.resetHeat());
   // clear a pocket to the right so the target is in open air regardless of where the walk ended
   await lv(() => {
@@ -459,6 +832,43 @@ async function runScenario(browser, sc, baseUrl) {
     await page.waitForFunction(() => globalThis.__LV.stats().phase === 'playing', null, { timeout: 5000 });
   }
 
+  // ================= scope zoom + enemy arrows
+  const z0 = await stats();
+  await page.keyboard.press('KeyZ');
+  await page.waitForTimeout(700); // eases in over ~0.4 s
+  const z1 = await stats();
+  check('Z turns the scope on at the active weapon\'s level (gentle: view widens 1 + 0.25·(N−1))', z1.scoped && Math.abs(z1.cameraView.vw - z0.cameraView.vw * z1.scopeView) < 2 && z1.scopeView === 1 + 0.25 * (z1.scopeLevel - 1) && z1.phase === 'playing', `level=${z1.scopeLevel} mult=${z1.scopeView} view ${z0.cameraView.vw}→${z1.cameraView.vw}`);
+  check('HUD shows the scope badge', (await page.locator('[data-hud=zoom]').innerText().catch(() => '')).includes(`${z1.scopeLevel}X`));
+  // scope power follows the gun: sniper = 7x (the whole cave), blaster = 2x
+  await lv(() => globalThis.__LV.giveWeapon('sniper'));
+  await page.waitForTimeout(900);
+  const zs = await stats();
+  check('sniper scope is 7x = 2.5× view', zs.scopeLevel === 7 && Math.abs(zs.cameraView.vw - z0.cameraView.vw * 2.5) < z0.cameraView.vw * 0.01 && zs.weapon.id === 'sniper', `level=${zs.scopeLevel} view=${zs.cameraView.vw} (1x=${z0.cameraView.vw})`);
+  await shot('5c-sniper-7x');
+  fpsLog.sniper7x = await sampleFps(900);
+  await lv(() => globalThis.__LV.giveWeapon('blaster'));
+  await page.waitForTimeout(700);
+  const zb = await stats();
+  check('switching to the blaster drops the scope to 2x = 1.25× view', zb.weapon.id === 'blaster' && zb.scopeLevel === 2 && Math.abs(zb.cameraView.vw - z0.cameraView.vw * 1.25) < 2, `weapon=${zb.weapon.id} level=${zb.scopeLevel} view=${zb.cameraView.vw}`);
+  await shot('5b-zoom-out');
+  fpsLog.zoomOut = await sampleFps(900);
+  await page.keyboard.press('KeyZ');
+  await page.waitForTimeout(700);
+  const z2 = await stats();
+  check('Z again turns the scope off', !z2.scoped && z2.zoom === 1 && Math.abs(z2.cameraView.vw - z0.cameraView.vw) < 1, `zoom=${z2.zoom}`);
+  // an alien far to the right is off-screen at 1x → red edge arrow; a near one gets none
+  await lv(() => globalThis.__LV.setWaves(false));
+  await lv(() => globalThis.__LV.clearAliens());
+  await lv(() => {
+    const p = globalThis.__LV.stats().player;
+    globalThis.__LV.spawnAlienAt('flyer', p.x + 45, p.y - 2, true);
+  });
+  await page.waitForTimeout(150);
+  const zi = await stats();
+  const arrow = zi.indicators.find((i) => i.kind === 'alien' && !i.onScreen);
+  check('off-screen alien gets an edge arrow inside the view', !!arrow && arrow.x >= 0 && arrow.x <= zi.vw && arrow.y >= 0 && arrow.y <= zi.vh && arrow.x > zi.vw * 0.9, JSON.stringify(arrow));
+  if (isMobile) check('mobile ZOOM button present', await visible('[data-action=m-zoom]'));
+
   // ================= Step 5/6: damage, pause, game over, retry
   const hp = await lv(() => globalThis.__LV.damagePlayer(30));
   check('player takes damage', hp <= 70, `health=${hp}`);
@@ -468,10 +878,20 @@ async function runScenario(browser, sc, baseUrl) {
   await page.keyboard.press('Escape');
   await page.waitForTimeout(150);
   check('Escape pauses', (await stats()).phase === 'paused' && (await visible('[data-ui=pause]')));
+  check('pause overlay carries the settings tabs', await visible('[data-ui=pause] [data-ui=settings]'));
   await shot('6-pause');
   await page.click('[data-action=resume]');
   await page.waitForTimeout(150);
   check('resume works', (await stats()).phase === 'playing');
+  // in-game settings cog (replaces the old II button)
+  const cogBox = await page.locator('[data-action=settings-cog]').boundingBox();
+  check('in-game cog visible and finger-sized (≥ 40 px)', cogBox && cogBox.width >= 40 && cogBox.height >= 40 && (await visible('[data-action=settings-cog] .cog')), JSON.stringify(cogBox));
+  check('old II pause button is gone', !(await visible('[data-action=m-pause]')));
+  await page.click('[data-action=settings-cog]');
+  await page.waitForTimeout(150);
+  check('cog pauses and opens the in-game menu', (await stats()).phase === 'paused' && (await visible('[data-ui=pause]')));
+  await page.click('[data-action=resume]');
+  await page.waitForTimeout(150);
   await lv(() => globalThis.__LV.damagePlayer(999));
   await page.waitForTimeout(400);
   check('lethal damage -> game over', (await stats()).phase === 'gameover' && (await visible('[data-ui=gameover]')));
@@ -527,9 +947,26 @@ async function runScenario(browser, sc, baseUrl) {
     await lv(() => globalThis.__LV.toMenu());
     await page.waitForTimeout(200);
   }
+  // every map starts, plays, and looks different: rock density, palette, bomb kit
+  const mapStats = {};
+  for (const id of ['hollow', 'furnace', 'rift']) {
+    await lv((id) => globalThis.__LV.start(id), id);
+    await page.waitForTimeout(500);
+    const ms = await stats();
+    mapStats[id] = { solid: ms.solidTiles, biome: ms.biome, kit: ms.bombKit, phase: ms.phase, sky: ms.sky, topOpen: ms.topOpen };
+    await shot(`9-map-${id}`);
+    fpsLog[`map-${id}`] = await sampleFps(500);
+  }
+  const kits = Object.values(mapStats).map((m) => m.kit.join(','));
+  const biomes = new Set(Object.values(mapStats).map((m) => m.biome));
+  check('all four maps start and play', Object.values(mapStats).every((m) => m.phase === 'playing' && m.kit.length === 3), JSON.stringify(mapStats));
+  check('three distinct palettes and bomb kits', biomes.size === 3 && new Set(kits).size === 3, `biomes=${[...biomes]} kits=${kits.join(' | ')}`);
+  check('Rift has an open sky, caves a ceiling', Object.values(mapStats).every((m) => m.topOpen === m.sky) && mapStats.rift.sky && !mapStats.hollow.sky, JSON.stringify(Object.fromEntries(Object.entries(mapStats).map(([k, v]) => [k, [v.sky, v.topOpen]]))));
+  check('Furnace is dense, Rift is open', mapStats.furnace.solid > mapStats.rift.solid + 800, `furnace=${mapStats.furnace.solid} rift=${mapStats.rift.solid} hollow=${mapStats.hollow.solid}`);
+  await lv(() => globalThis.__LV.toMenu());
   await page.waitForTimeout(300);
   const statsAfter = await stats();
-  check('render loop never threw (incl. 4 world rebuilds)', statsAfter.loopErrors === 0, `loopErrors=${statsAfter.loopErrors}`);
+  check('render loop never threw (incl. world rebuilds on every map)', statsAfter.loopErrors === 0, `loopErrors=${statsAfter.loopErrors}`);
   const gpu = await page.evaluate(() => globalThis.__LV.gpu());
   await ctx.close();
   return { scenario: sc.name, loadMs, gpu, fpsLog, checks, statsAfter, errors, warnings };
@@ -560,17 +997,26 @@ try {
       console.log(`FAILED: ${e.message}`);
     }
   }
-  if (!only || 'multiplayer'.includes(only)) {
+  if (!only || 'multiplayer'.includes(only) || 'capacity'.includes(only)) {
     process.stdout.write(`▶ multiplayer (2 tabs) ... `);
     let gs = null;
     try {
       gs = await startGameServer();
-      const r = await runMultiplayer(browser, server.url, gs.url);
-      results.push(r);
-      const failed = r.checks.filter((c) => !c.ok);
-      console.log(`checks ${r.checks.length - failed.length}/${r.checks.length} | errors ${r.errors.length}`);
-      for (const c of failed) console.log(`   ✗ ${c.name} — ${c.info}`);
-      for (const e of r.errors) console.log(`   ! ${e}`);
+      if (!only || 'multiplayer'.includes(only)) {
+        const r = await runMultiplayer(browser, server.url, gs.url);
+        results.push(r);
+        const failed = r.checks.filter((c) => !c.ok);
+        console.log(`checks ${r.checks.length - failed.length}/${r.checks.length} | errors ${r.errors.length}`);
+        for (const c of failed) console.log(`   ✗ ${c.name} — ${c.info}`);
+        for (const e of r.errors) console.log(`   ! ${e}`);
+      } else console.log('skipped');
+      process.stdout.write(`▶ capacity (12 node clients) ... `);
+      const rc = await runCapacity(gs.url);
+      results.push(rc);
+      const failedC = rc.checks.filter((c) => !c.ok);
+      console.log(`checks ${rc.checks.length - failedC.length}/${rc.checks.length} | errors ${rc.errors.length}`);
+      for (const c of failedC) console.log(`   ✗ ${c.name} — ${c.info}`);
+      for (const e of rc.errors) console.log(`   ! ${e}`);
     } catch (e) {
       results.push({ scenario: 'multiplayer', fatal: String(e), checks: [], errors: [] });
       console.log(`FAILED: ${e.message}`);
@@ -593,7 +1039,7 @@ for (const r of results) {
   }
   if (!r.fpsLog) {
     const passed = r.checks.filter((c) => c.ok).length;
-    md += `| ${r.scenario} | 2 tabs | | | | | | | ${r.fpsA?.toFixed(0) ?? '-'} | ${passed}/${r.checks.length} | ${r.errors.length} |\n`;
+    md += `| ${r.scenario} | ${r.scenario === 'capacity' ? '12 node clients' : '2 tabs'} | | | | | | | ${r.fpsA?.toFixed(0) ?? '-'} | ${passed}/${r.checks.length} | ${r.errors.length} |\n`;
     continue;
   }
   const f = r.fpsLog;

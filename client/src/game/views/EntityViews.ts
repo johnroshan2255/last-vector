@@ -2,7 +2,8 @@ import { Container, Graphics, Sprite, type Texture } from 'pixi.js';
 import { ALIENS, PPU, type AlienKind, type BiomeId, BIOMES } from '@shared/constants';
 import { BOMBS, WEAPONS } from '@shared/weapons';
 import type { AlienSnap, BombSnap, CloudSnap, DropSnap, PickupSnap, PlayerSnap, Snapshot } from '@shared/sim/events';
-import { astronautParts, bombPickupTexture, crateTextures, crawlerTextures, flyerTextures, fuelTexture, mineTexture, shardTexture, type AstronautParts } from '../sprites';
+import { astronautParts, bombPickupTexture, bombTexture, crateTextures, crawlerTextures, flameTextures, flyerTextures, fuelTexture, shardTexture, weaponTextures, type AstronautParts } from '../sprites';
+import { BOMB_ORDER, type BombType, type WeaponId } from '@shared/weapons';
 
 class KeyedViews<S extends { id: string }, V extends Container> {
   readonly container = new Container();
@@ -76,7 +77,7 @@ class PlayerSprite extends Container {
     this.arm = new Sprite(parts.arm);
     this.arm.anchor.set(0, 0.5);
     this.gun = new Sprite(parts.gun);
-    this.gun.anchor.set(0, 0.5);
+    this.gun.anchor.set(0.15, 0.55); // grip sits in the glove
     this.gun.x = 6;
     this.armPivot.addChild(this.arm, this.gun);
     this.armPivot.y = -1; // shoulder
@@ -94,6 +95,8 @@ export class EntityViews {
   readonly drops: KeyedViews<DropSnap, Container>;
   readonly clouds: KeyedViews<CloudSnap, Container>;
   private frames: Record<AlienKind, Texture[]>;
+  private readonly weaponTex: Record<WeaponId, Texture>;
+  private readonly flames: Texture[];
   private animPhase = new Map<string, number>();
   private readonly parts = astronautParts();
 
@@ -108,7 +111,9 @@ export class EntityViews {
     };
     const pickupTex = { shard: shardTexture(p.fringe), fuel: fuelTexture(), bomb: bombPickupTexture(0x4fe3ff) };
     const crate = crateTextures();
-    const mineTex = { mine: mineTexture(BOMBS.mine.color), smoke: mineTexture(BOMBS.smoke.color) };
+    this.weaponTex = weaponTextures();
+    this.flames = flameTextures();
+    const bombTex = Object.fromEntries([...BOMB_ORDER, 'bomblet'].map((b) => [b, bombTexture(b as BombType)])) as Record<BombType, Texture>;
 
     this.players = new KeyedViews<PlayerSnap, PlayerSprite>(
       () => new PlayerSprite(this.parts),
@@ -130,7 +135,7 @@ export class EntityViews {
         // arm + gun point at the aim; flip the arm vertically when aiming left so the gun stays upright
         v.armPivot.rotation = s.aimAngle;
         v.armPivot.scale.y = Math.cos(s.aimAngle) < 0 ? -1 : 1;
-        v.gun.tint = WEAPONS[s.weapon].color;
+        v.gun.texture = this.weaponTex[s.weapon] ?? v.gun.texture;
         // recoil bob while firing the beam
         v.armPivot.x = s.beamOn ? Math.round(Math.sin(time * 40)) : 0;
         // hurt / invulnerability flash
@@ -160,11 +165,21 @@ export class EntityViews {
     this.bombs = new KeyedViews<BombSnap, Container>(
       (s) => {
         const c = new Container();
-        if (s.type === 'gel') {
-          const r = 0.35 * PPU;
-          c.addChild(new Graphics().circle(0, 0, r).fill(BOMBS.gel.color).circle(-r * 0.3, -r * 0.3, r * 0.3).fill({ color: 0xffffff, alpha: 0.6 }));
+        const def = BOMBS[s.type];
+        if (def.fuseSec > 0 || def.impact) {
+          // thrown charges: sprite + soft glow that pulses faster as the fuse runs down
+          const sp = new Sprite(bombTex[s.type]);
+          sp.anchor.set(0.5);
+          sp.label = 'body';
+          const glow = new Sprite(this.glow);
+          glow.anchor.set(0.5);
+          glow.blendMode = 'add';
+          glow.tint = def.color;
+          glow.scale.set(9 / this.glow.width);
+          glow.alpha = 0.35;
+          c.addChild(glow, sp);
         } else {
-          const sp = new Sprite(mineTex[s.type]);
+          const sp = new Sprite(bombTex[s.type]);
           sp.anchor.set(0.5, 0.9);
           const light = new Sprite(this.glow);
           light.anchor.set(0.5);
@@ -180,9 +195,12 @@ export class EntityViews {
       (v, s, time) => {
         v.x = Math.round(s.x * PPU);
         v.y = Math.round(s.y * PPU);
-        if (s.type === 'gel') {
-          const rate = 4 + (1 - Math.max(0, s.fuse) / BOMBS.gel.fuseSec) * 24;
+        const def = BOMBS[s.type];
+        if (def.fuseSec > 0 || def.impact) {
+          const rate = def.fuseSec > 0 ? 4 + (1 - Math.max(0, s.fuse) / def.fuseSec) * 24 : 10;
           v.alpha = 0.7 + 0.3 * Math.sin(time * rate);
+          const body = v.getChildByLabel('body') as Sprite | null;
+          if (body) body.rotation = time * (def.impact ? 6 : 4);
         } else {
           const light = v.getChildByLabel('light') as Sprite | null;
           if (light) light.alpha = s.armed ? (Math.sin(time * 8) > 0 ? 0.9 : 0.15) : 0.25;
@@ -208,16 +226,20 @@ export class EntityViews {
         chute.anchor.set(0.5, 1);
         chute.y = -5;
         chute.label = 'chute';
-        const box = new Sprite(crate.crate);
+        // the cargo itself hangs under the chute (harness lines drawn above it): a weapon, or a bomb (drawn 2x so it reads)
+        const box = new Sprite(s.weapon ? (this.weaponTex[s.weapon] ?? crate.crate) : s.bomb ? bombTex[s.bomb] : crate.crate);
         box.anchor.set(0.5, 0.5);
-        box.tint = 0xffffff;
+        if (s.bomb) box.scale.set(1.25); // bombs are small; the glow does the signalling
+        box.label = 'weapon';
+        const lines = new Graphics().moveTo(-6, -5).lineTo(-3, 0).moveTo(6, -5).lineTo(3, 0).stroke({ color: 0x8f95a8, width: 1 });
+        lines.label = 'lines';
         const glow = new Sprite(this.glow);
         glow.anchor.set(0.5);
         glow.blendMode = 'add';
-        glow.tint = WEAPONS[s.weapon].color;
+        glow.tint = s.weapon ? WEAPONS[s.weapon].color : s.bomb ? BOMBS[s.bomb].color : 0xffffff;
         glow.scale.set(22 / this.glow.width);
         glow.alpha = 0.5;
-        c.addChild(glow, chute, box);
+        c.addChild(glow, chute, lines, box);
         return c;
       },
       (v, s, time) => {
@@ -228,23 +250,57 @@ export class EntityViews {
           chute.visible = !s.landed;
           chute.rotation = Math.sin(time * 2) * 0.12;
         }
+        const lines = v.getChildByLabel('lines');
+        if (lines) lines.visible = !s.landed;
+        const w = v.getChildByLabel('weapon') as Sprite | null;
+        if (w) {
+          // sway under the chute while falling; lie flat and bob once landed
+          w.rotation = s.landed ? 0 : Math.sin(time * 2) * 0.12;
+          w.y = s.landed ? Math.round(Math.sin(time * 5) * 1) : 0;
+        }
         v.alpha = s.landed ? 0.85 + 0.15 * Math.sin(time * 6) : 1;
       },
     );
     this.clouds = new KeyedViews<CloudSnap, Container>(
       (s) => {
         const c = new Container();
-        for (let i = 0; i < 7; i++) {
-          const puff = new Sprite(this.glow);
-          puff.anchor.set(0.5);
-          puff.tint = 0x8a93a3;
-          puff.alpha = 0.55;
-          const a = (i / 7) * Math.PI * 2;
-          const d = i === 0 ? 0 : s.r * PPU * 0.45;
-          puff.x = Math.cos(a) * d;
-          puff.y = Math.sin(a) * d;
-          puff.scale.set((s.r * PPU * 1.1) / this.glow.width);
-          c.addChild(puff);
+        if (s.kind === 'fire') {
+          // a burning pool: a low ember glow hugging the ground and a row of licking flames across its width
+          const glow = new Sprite(this.glow);
+          glow.anchor.set(0.5);
+          glow.blendMode = 'add';
+          glow.tint = 0xff7a2b;
+          glow.alpha = 0.35;
+          glow.scale.set((s.r * PPU * 2.2) / this.glow.width, (s.r * PPU * 0.9) / this.glow.width);
+          glow.label = 'glow';
+          c.addChild(glow);
+          const n = Math.max(4, Math.round(s.r * 3));
+          for (let i = 0; i < n; i++) {
+            const f = new Sprite(this.flames[i % 3]);
+            f.anchor.set(0.5, 1);
+            const t = n === 1 ? 0 : i / (n - 1) - 0.5;
+            f.x = Math.round(t * s.r * PPU * 1.7 + (Math.random() - 0.5) * 4);
+            f.y = Math.round(Math.abs(t) * 3 + 4);
+            const sc = 0.8 + (1 - Math.abs(t) * 1.2) * 0.9 + Math.random() * 0.3;
+            f.scale.set(sc, sc);
+            (f as Sprite & { phase: number; base: number }).phase = Math.random() * 10;
+            (f as Sprite & { phase: number; base: number }).base = sc;
+            f.label = 'flame';
+            c.addChild(f);
+          }
+        } else {
+          for (let i = 0; i < 7; i++) {
+            const puff = new Sprite(this.glow);
+            puff.anchor.set(0.5);
+            puff.tint = 0x8a93a3;
+            puff.alpha = 0.55;
+            const a = (i / 7) * Math.PI * 2;
+            const d = i === 0 ? 0 : s.r * PPU * 0.45;
+            puff.x = Math.cos(a) * d;
+            puff.y = Math.sin(a) * d;
+            puff.scale.set((s.r * PPU * 1.1) / this.glow.width);
+            c.addChild(puff);
+          }
         }
         return c;
       },
@@ -252,8 +308,24 @@ export class EntityViews {
         v.x = Math.round(s.x * PPU);
         v.y = Math.round(s.y * PPU);
         const fade = Math.min(1, s.ttl / 1.5);
-        v.alpha = 0.9 * fade;
-        v.rotation = time * 0.15;
+        if (s.kind === 'fire') {
+          v.alpha = fade;
+          // flames flicker: cycle frames, stretch and lean with a per-flame phase
+          for (const ch of v.children) {
+            if (ch.label !== 'flame') {
+              if (ch.label === 'glow') ch.alpha = 0.3 + 0.1 * Math.sin(time * 11);
+              continue;
+            }
+            const f = ch as Sprite & { phase: number; base: number };
+            f.texture = this.flames[Math.floor((time * 12 + f.phase) % 3)];
+            f.scale.y = f.base * (0.85 + 0.3 * Math.abs(Math.sin(time * 9 + f.phase)));
+            f.scale.x = f.base * (Math.sin(time * 5 + f.phase) > 0 ? 1 : -1);
+            f.skew.x = Math.sin(time * 4 + f.phase) * 0.18;
+          }
+        } else {
+          v.alpha = 0.9 * fade;
+          v.rotation = time * 0.15;
+        }
       },
     );
     this.container.addChild(this.pickups.container, this.drops.container, this.aliens.container, this.bombs.container, this.players.container, this.clouds.container);

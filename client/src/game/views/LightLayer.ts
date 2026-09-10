@@ -61,6 +61,10 @@ export class LightLayer {
   /** 0 = no darkness, 1 = black outside lights */
   ambient = 0.62;
   enabled = true;
+  /** world scale of the scene (scope zoom): light positions/radii are given in world px and mapped here */
+  zoom = 1;
+  /** tile grid width, to place burning-tile lights */
+  gridW = 200;
 
   /** compatibility alias: Game adds `sprite` to the stage */
   get sprite(): Mesh<Geometry, Shader> {
@@ -118,19 +122,24 @@ export class LightLayer {
   }
 
   private add(x: number, y: number, r: number, a: number, color = 0xffffff): void {
+    const z = this.zoom;
+    x *= z;
+    y *= z;
+    r *= z;
     // cull lights fully off-screen
     if (x + r < 0 || y + r < 0 || x - r > this.vw || y - r > this.vh) return;
     this.frame.push({ x, y, r, a, color });
   }
 
-  draw(snap: Snapshot, cam: Camera, menuMode: boolean, time: number): void {
+  draw(snap: Snapshot, cam: Camera, menuMode: boolean, time: number, extra: { x: number; y: number; r: number; a: number; color: number }[] = []): void {
     this.mesh.visible = this.enabled;
     if (!this.enabled) return;
     const L = cam.left;
     const T = cam.top;
     this.frame.length = 0;
+    for (const e of extra) this.add(e.x, e.y, e.r, e.a, e.color);
     // priority order: players, beams, transient, then everything else (truncated at MAX_LIGHTS)
-    if (menuMode) this.add(this.vw / 2, this.vh / 2, Math.max(this.vw, this.vh) * 0.75, 0.9);
+    if (menuMode) this.add(this.vw / 2 / this.zoom, this.vh / 2 / this.zoom, (Math.max(this.vw, this.vh) * 0.75) / this.zoom, 0.9);
     for (const p of snap.players) {
       if (!p.alive) continue;
       const flick = 1 + Math.sin(time * 9 + p.x) * 0.03;
@@ -149,8 +158,15 @@ export class LightLayer {
     for (const t of this.transient) this.add(t.x - L, t.y - T, t.r * (0.6 + 0.4 * (t.ttl / t.maxTtl)), t.ttl / t.maxTtl, t.color);
     for (const b of snap.bombs) this.add(b.x * PPU - L, b.y * PPU - T, b.armed && Math.sin(time * 8) > 0 ? 26 : 12, 0.8);
     for (const d of snap.drops) this.add(d.x * PPU - L, d.y * PPU - T, 40, 0.8);
-    for (const c of snap.clouds) this.add(c.x * PPU - L, c.y * PPU - T, c.r * PPU * 0.8, 0.35);
+    for (const c of snap.clouds) {
+      if (c.kind === 'fire') this.add(c.x * PPU - L, c.y * PPU - T, c.r * PPU * 1.6, 0.85 + 0.15 * Math.sin(time * 11), 0xffa060);
+      else this.add(c.x * PPU - L, c.y * PPU - T, c.r * PPU * 0.8, 0.35);
+    }
     for (const a of snap.aliens) this.add(a.x * PPU - L, a.y * PPU - T, a.burning ? 40 : 14, a.burning ? 0.9 : 0.5, a.burning ? 0xffc080 : 0xffffff);
+    for (let k = 0; k < snap.burning.length && k < 12; k++) {
+      const i = snap.burning[k];
+      this.add(((i % this.gridW) + 0.5) * PPU - L, (Math.floor(i / this.gridW) + 0.5) * PPU - T, 30, 0.8 + 0.2 * Math.sin(time * 15 + i), 0xffa050);
+    }
     for (const k of snap.pickups) this.add(k.x * PPU - L, k.y * PPU - T, 14, 0.6);
 
     const n = Math.min(MAX_LIGHTS, this.frame.length);

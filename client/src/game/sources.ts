@@ -3,6 +3,7 @@ import type { PlayerInput } from '@shared/types';
 import type { SimEvent, Snapshot } from '@shared/sim/events';
 import type { TileGrid } from '@shared/sim/terrain';
 import type { Match } from '@shared/sim/match';
+import type { MapId } from '@shared/maps';
 
 /**
  * Where the game state comes from: a local Match (single-player) or the
@@ -13,6 +14,7 @@ export interface MatchSource {
   readonly grid: TileGrid;
   readonly seed: number;
   readonly biome: BiomeId;
+  readonly map: MapId;
   readonly localId: string;
   /** total tiles destroyed so far */
   readonly destroyedCount: number;
@@ -45,6 +47,9 @@ export class LocalSource implements MatchSource {
   }
   get biome(): BiomeId {
     return this.match.biome;
+  }
+  get map(): MapId {
+    return this.match.map.id;
   }
   get destroyedCount(): number {
     return this.match.destroyedTotal;

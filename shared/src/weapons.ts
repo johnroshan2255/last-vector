@@ -1,6 +1,6 @@
 // LAST-VECTOR — weapon roster. Single source of truth for client + server.
 
-export type WeaponId = 'blaster' | 'scatter' | 'vulcan' | 'vector' | 'arc' | 'launcher' | 'flamer' | 'rail' | 'plasma';
+export type WeaponId = 'blaster' | 'scatter' | 'vulcan' | 'vector' | 'arc' | 'launcher' | 'flamer' | 'rail' | 'plasma' | 'sniper' | 'emp';
 export type WeaponKind = 'projectile' | 'beam' | 'arc' | 'rocket' | 'flame' | 'rail';
 
 export interface WeaponDef {
@@ -39,6 +39,10 @@ export interface WeaponDef {
   burn?: { dps: number; sec: number };
   /** rail: passes through every alien on the line */
   pierce?: boolean;
+  /** emp: pilots caught in the blast lose their jetpack for this long */
+  jamSec?: number;
+  /** scope zoom-out factor when the player toggles the scope (Mini-Militia style): 2 = twice the view … 7 = the whole cave */
+  zoom: number;
   /** short description for the menu / weapon bar */
   blurb: string;
 }
@@ -61,6 +65,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     color: 0x4fe3ff,
     coreColor: 0xffffff,
     unlockWave: 1,
+    zoom: 2,
     blurb: 'Reliable sidearm. Infinite, accurate, cool-running.',
   },
   vector: {
@@ -80,6 +85,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     color: 0x4fe3ff,
     coreColor: 0xffffff,
     unlockWave: 1,
+    zoom: 2,
     blurb: 'Continuous mining beam. Carves rock fast, overheats.',
   },
   scatter: {
@@ -99,6 +105,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     color: 0xffb84f,
     coreColor: 0xfff2c0,
     unlockWave: 2,
+    zoom: 2,
     blurb: 'Seven-pellet shotgun. Brutal up close, blows out walls.',
   },
   vulcan: {
@@ -118,6 +125,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     color: 0xfff27a,
     coreColor: 0xffffff,
     unlockWave: 3,
+    zoom: 3,
     blurb: 'Minigun. Hose of tracers, shreds swarms, runs hot.',
   },
   arc: {
@@ -139,6 +147,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     chain: 3,
     chainRange: 5,
     unlockWave: 4,
+    zoom: 3,
     blurb: 'Lightning gun. Seeks the nearest alien and chains between them.',
   },
   launcher: {
@@ -159,6 +168,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     coreColor: 0xffffff,
     blastRadius: 2.8,
     unlockWave: 5,
+    zoom: 4,
     blurb: 'Rockets. Big craters, big knockback, slow reload.',
   },
   flamer: {
@@ -179,6 +189,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     coreColor: 0xfff0a0,
     burn: { dps: 9, sec: 3 },
     unlockWave: 2,
+    zoom: 2,
     blurb: 'Short-range fire cone. Sets aliens burning, does not dig.',
   },
   rail: {
@@ -199,7 +210,50 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     coreColor: 0xffffff,
     pierce: true,
     unlockWave: 4,
+    zoom: 5,
     blurb: 'Instant piercing slug. Goes through every alien on the line.',
+  },
+  sniper: {
+    id: 'sniper',
+    name: 'SNIPER',
+    kind: 'projectile',
+    damage: 70,
+    fireRate: 0.75,
+    pellets: 1,
+    spread: 0,
+    speed: 95,
+    range: 60,
+    digRadius: 0.5,
+    heat: 30,
+    knockback: 9,
+    recoil: 4,
+    color: 0xc8ffd8,
+    coreColor: 0xffffff,
+    unlockWave: 2,
+    zoom: 7,
+    blurb: 'Long-range single shot. One round, one kill on most things.',
+  },
+  emp: {
+    id: 'emp',
+    name: 'EMP',
+    kind: 'rocket',
+    damage: 18,
+    fireRate: 0.8,
+    pellets: 1,
+    spread: 0.02,
+    speed: 9,
+    range: 34,
+    digRadius: 0,
+    heat: 26,
+    knockback: 6,
+    recoil: 2,
+    color: 0xb48cff,
+    coreColor: 0xf0e8ff,
+    blastRadius: 2.6,
+    jamSec: 10,
+    unlockWave: 3,
+    zoom: 3,
+    blurb: 'Slow crackling orb. Anyone caught in the burst loses their jetpack for 10 s.',
   },
   plasma: {
     id: 'plasma',
@@ -219,29 +273,42 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     coreColor: 0xffffff,
     blastRadius: 1.4,
     unlockWave: 3,
+    zoom: 3,
     blurb: 'Rapid plasma bursts with small blasts.',
   },
 };
 
 /** full roster (display order) */
-export const WEAPON_ORDER: WeaponId[] = ['blaster', 'vector', 'scatter', 'vulcan', 'plasma', 'flamer', 'arc', 'rail', 'launcher'];
+export const WEAPON_ORDER: WeaponId[] = ['blaster', 'vector', 'scatter', 'vulcan', 'plasma', 'flamer', 'sniper', 'arc', 'rail', 'launcher', 'emp'];
 /** what every player spawns with (slot 0, slot 1) */
 export const START_KIT: [WeaponId, WeaponId] = ['blaster', 'vector'];
-/** weapons that supply drops can contain, by earliest wave (never empty: early waves get the wave-2 tier) */
-export function dropPool(wave: number): WeaponId[] {
+/**
+ * Weapons supply drops can contain on this map, by earliest wave. Never empty:
+ * early waves get the wave-2 tier, and a map whose roster is all late-tier falls back to the whole roster.
+ */
+export function dropPool(mapWeapons: readonly WeaponId[], wave: number): WeaponId[] {
   const tier = Math.max(2, wave);
-  return WEAPON_ORDER.filter((id) => WEAPONS[id].unlockWave <= tier && !START_KIT.includes(id));
+  const roster = mapWeapons.filter((id) => WEAPONS[id] && !START_KIT.includes(id));
+  const pool = roster.filter((id) => WEAPONS[id].unlockWave <= tier);
+  return pool.length ? pool : roster;
 }
 
 // ---- Bombs (secondary) ----
-export type BombType = 'gel' | 'mine' | 'smoke';
+/** carried types + `bomblet` (spawned by CLUSTER, never carried) */
+export type BombType = 'gel' | 'mine' | 'smoke' | 'cluster' | 'impact' | 'heavy' | 'bomblet';
 export interface BombDef {
   id: BombType;
   name: string;
-  /** seconds until a timed bomb goes off (0 = proximity only) */
+  /** seconds until a timed bomb goes off (0 = proximity / impact only) */
   fuseSec: number;
   /** proximity trigger radius in tiles (0 = none) */
   proximity: number;
+  /** detonates the moment it touches rock / an alien (after a short arming delay) */
+  impact?: boolean;
+  /** splits into this many bomblets, each with its own short fuse */
+  cluster?: { count: number; fuseSec: number; speed: number };
+  /** leaves a burning patch: radius (tiles), duration, damage per second to anything inside */
+  fire?: { radius: number; sec: number; dps: number };
   /** seconds after landing before a proximity bomb is live */
   armSec: number;
   blastRadius: number;
@@ -250,6 +317,7 @@ export interface BombDef {
   /** extra upward speed for a lob */
   lob: number;
   max: number;
+  /** seconds per regenerated bomb; 0 = no regen (refills come from bomb crates and alien drops) */
   regenSec: number;
   /** smoke cloud radius (tiles) and duration */
   smokeRadius: number;
@@ -259,7 +327,10 @@ export interface BombDef {
   color: number;
   blurb: string;
 }
-export const BOMB_ORDER: BombType[] = ['gel', 'mine', 'smoke'];
+/** carried bomb types in HUD / cycle order */
+export const BOMB_ORDER: BombType[] = ['gel', 'mine', 'smoke', 'cluster', 'impact', 'heavy'];
+/** starting / max count per carried type, in BOMB_ORDER */
+export const bombStartCounts = (): number[] => BOMB_ORDER.map((b) => BOMBS[b].max);
 export const BOMBS: Record<BombType, BombDef> = {
   gel: {
     id: 'gel',
@@ -272,7 +343,7 @@ export const BOMBS: Record<BombType, BombDef> = {
     throwSpeed: 17,
     lob: 6,
     max: 5,
-    regenSec: 6,
+    regenSec: 0,
     smokeRadius: 0,
     smokeSec: 0,
     lifeSec: 5,
@@ -281,21 +352,22 @@ export const BOMBS: Record<BombType, BombDef> = {
   },
   mine: {
     id: 'mine',
-    name: 'MINE',
+    name: 'FIRE MINE',
     fuseSec: 0,
     proximity: 1.7,
     armSec: 0.8,
-    blastRadius: 3,
-    damage: 65,
+    blastRadius: 1.6,
+    damage: 22,
     throwSpeed: 15,
     lob: 5,
     max: 3,
-    regenSec: 10,
+    regenSec: 0,
     smokeRadius: 0,
     smokeSec: 0,
-    lifeSec: 40,
+    lifeSec: 60,
     color: 0xff4f5e,
-    blurb: 'Sticks where it lands, blows when anything comes close.',
+    fire: { radius: 2.2, sec: 4, dps: 14 },
+    blurb: 'Sticks where it lands. Bursts into flame when anyone comes close.',
   },
   smoke: {
     id: 'smoke',
@@ -308,12 +380,86 @@ export const BOMBS: Record<BombType, BombDef> = {
     throwSpeed: 15,
     lob: 5,
     max: 3,
-    regenSec: 9,
+    regenSec: 0,
     smokeRadius: 4.2,
     smokeSec: 7,
     lifeSec: 40,
     color: 0xb0b8c8,
     blurb: 'Proximity smoke. Aliens lose you inside the cloud.',
+  },
+  cluster: {
+    id: 'cluster',
+    name: 'CLUSTER',
+    fuseSec: 1.0,
+    proximity: 0,
+    armSec: 0,
+    blastRadius: 1.6,
+    damage: 25,
+    throwSpeed: 17,
+    lob: 6,
+    max: 2,
+    regenSec: 0,
+    smokeRadius: 0,
+    smokeSec: 0,
+    lifeSec: 5,
+    color: 0xffb84f,
+    cluster: { count: 5, fuseSec: 0.55, speed: 9 },
+    blurb: 'Pops into five bomblets that scatter and blow a wide area.',
+  },
+  impact: {
+    id: 'impact',
+    name: 'IMPACT',
+    fuseSec: 0,
+    proximity: 0,
+    armSec: 0,
+    blastRadius: 2.4,
+    damage: 40,
+    throwSpeed: 22,
+    lob: 3,
+    max: 3,
+    regenSec: 0,
+    smokeRadius: 0,
+    smokeSec: 0,
+    lifeSec: 6,
+    color: 0xff4fd8,
+    impact: true,
+    blurb: 'Goes off the instant it hits anything. Fast, flat throw.',
+  },
+  heavy: {
+    id: 'heavy',
+    name: 'HEAVY',
+    fuseSec: 1.6,
+    proximity: 0,
+    armSec: 0,
+    blastRadius: 4.6,
+    damage: 75,
+    throwSpeed: 14,
+    lob: 6,
+    max: 2,
+    regenSec: 0,
+    smokeRadius: 0,
+    smokeSec: 0,
+    lifeSec: 5,
+    color: 0xff6a2b,
+    blurb: 'Long fuse, huge blast. Levels a room.',
+  },
+  bomblet: {
+    id: 'bomblet',
+    name: 'BOMBLET',
+    fuseSec: 0.55,
+    proximity: 0,
+    armSec: 0,
+    blastRadius: 1.3,
+    damage: 18,
+    throwSpeed: 0,
+    lob: 0,
+    max: 0,
+    regenSec: 0,
+    smokeRadius: 0,
+    smokeSec: 0,
+    lifeSec: 2,
+    color: 0xffb84f,
+    blurb: 'Cluster fragment.',
   },
 };
 

@@ -55,3 +55,36 @@ describe('terrain', () => {
     expect(d).toBeLessThan(8);
   });
 });
+
+import { MAPS, MAP_ORDER } from '../src/maps.js';
+import { TILE_AIR } from '../src/sim/terrain.js';
+
+describe('map layouts', () => {
+  it('each map style yields a different, deterministic cave with an open spawn pocket', () => {
+    const solidFraction = (g: { tiles: Uint8Array }) => 1 - [...g.tiles].filter((t) => t === TILE_AIR).length / g.tiles.length;
+    const fractions: Record<string, number> = {};
+    for (const id of MAP_ORDER) {
+      const a = generateTerrain(777, undefined, undefined, MAPS[id].terrain);
+      const b = generateTerrain(777, undefined, undefined, MAPS[id].terrain);
+      expect(Buffer.from(a.grid.tiles).equals(Buffer.from(b.grid.tiles))).toBe(true);
+      expect(a.grid.isSolid(a.spawn.x, a.spawn.y)).toBe(false);
+      expect(a.grid.isSolid(a.spawn.x, a.spawn.y + 7)).toBe(true); // floor under the pocket
+      fractions[id] = solidFraction(a.grid);
+      const sky = !!MAPS[id].terrain.openTop;
+      // sky maps have no ceiling; caves are sealed on top
+      expect(a.grid.isSolid(Math.floor(a.grid.w / 2), 1), `${id} top`).toBe(!sky);
+      if (sky) {
+        const skyRow = Math.floor(a.grid.h * MAPS[id].terrain.openTop!);
+        let air = 0;
+        for (let x = 4; x < a.grid.w - 4; x++) if (!a.grid.isSolid(x, Math.floor(skyRow * 0.15))) air++;
+        expect(air / (a.grid.w - 8), `${id} sky is mostly open`).toBeGreaterThan(0.85);
+      }
+    }
+    // dense tunnels vs open voids must actually differ in how much rock is left
+    expect(fractions.furnace).toBeGreaterThan(fractions.rift + 0.08);
+    expect(fractions.rift).toBeLessThan(fractions.hollow);
+    // the four maps produce four distinct grids
+    const grids = MAP_ORDER.map((id) => Buffer.from(generateTerrain(777, undefined, undefined, MAPS[id].terrain).grid.tiles).toString('base64'));
+    expect(new Set(grids).size).toBe(3);
+  });
+});

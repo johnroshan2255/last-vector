@@ -12,11 +12,20 @@ export class InputSystem {
   private mouse = { x: 0, y: 0, left: false, right: false }; // virtual-canvas px
   private bombQueued = false;
   private bombHeld = false; // edge detection: one throw per press, even if held
+  private takeQueued = false;
+  private takeHeld = false;
   private pauseQueued = false;
   private debugToggle = false;
   private lagCycle = false;
+  private zoomToggle = false;
   private weapon = 0; // active slot 0|1
   private bombType = 0;
+  /** indices into BOMB_ORDER the current map allows; cycling stays inside this list */
+  private bombKit: number[] = BOMB_ORDER.map((_, i) => i);
+  /** how many of each type the player carries (cycling skips empty types) */
+  private bombCounts: number[] = BOMB_ORDER.map(() => 99);
+  private wheelAcc = 0;
+  private lastSwapAt = 0;
   private touch: TouchState | null = null;
   private lastAim = 0;
   private lastAimAt = 0;
@@ -44,11 +53,12 @@ export class InputSystem {
     if (e.repeat) return;
     this.keys.add(e.code);
     if (e.code === 'KeyE' || e.code === 'ShiftLeft') this.bombQueued = true;
+    if (e.code === 'KeyG') this.takeQueued = true; // pick up the crate you stand next to
     if (e.code === 'KeyQ' || e.code === 'Tab') {
       e.preventDefault();
       this.cycleWeapon(1);
     }
-    if (e.code === 'KeyB' || e.code === 'KeyC') this.bombType = (this.bombType + 1) % BOMB_ORDER.length;
+    if (e.code === 'KeyB' || e.code === 'KeyC') this.cycleBomb();
     if (e.code === 'Escape' || e.code === 'KeyP') this.pauseQueued = true;
     if (e.code === 'F3') {
       e.preventDefault();
@@ -58,6 +68,7 @@ export class InputSystem {
       e.preventDefault();
       this.lagCycle = true;
     }
+    if (e.code === 'KeyZ' || e.code === 'Minus' || e.code === 'Equal' || e.code === 'NumpadSubtract' || e.code === 'NumpadAdd') this.zoomToggle = true;
     if (e.code === 'Digit1') this.weapon = 0;
     if (e.code === 'Digit2') this.weapon = 1;
     if (e.code === 'Space') e.preventDefault();
@@ -74,6 +85,10 @@ export class InputSystem {
     if (e.pointerType === 'touch') return;
     this.onPointer(e);
     if (e.button === 0) this.mouse.left = true;
+    if (e.button === 1) {
+      e.preventDefault();
+      this.zoomToggle = true; // middle click: scope zoom
+    }
     if (e.button === 2) {
       this.mouse.right = true;
       this.bombQueued = true;
@@ -85,16 +100,52 @@ export class InputSystem {
   };
   private onWheel = (e: WheelEvent) => {
     e.preventDefault();
-    this.cycleWeapon(e.deltaY > 0 ? 1 : -1);
+    // trackpads emit dozens of tiny deltas per flick: accumulate to one notch and rate-limit
+    this.wheelAcc += e.deltaY;
+    if (Math.abs(this.wheelAcc) < 40) return;
+    this.wheelAcc = 0;
+    this.cycleWeapon(1);
   };
 
+  /** toggle slot 0 <-> 1, at most once per 150 ms (a wheel notch / button tap = one swap) */
   cycleWeapon(delta: number): void {
     void delta;
+    const now = performance.now();
+    if (now - this.lastSwapAt < 150) return;
+    this.lastSwapAt = now;
     this.weapon = this.weapon ? 0 : 1;
   }
 
+  /** next bomb type within the map's kit that we actually have (stays put if nothing else is left) */
   cycleBomb(): void {
-    this.bombType = (this.bombType + 1) % BOMB_ORDER.length;
+    const kit = this.bombKit.length ? this.bombKit : BOMB_ORDER.map((_, i) => i);
+    const i = kit.indexOf(this.bombType);
+    for (let step = 1; step <= kit.length; step++) {
+      const cand = kit[(i + step) % kit.length];
+      if ((this.bombCounts[cand] ?? 0) > 0 || cand === this.bombType) {
+        this.bombType = cand;
+        return;
+      }
+    }
+  }
+
+  /** pick a bomb type directly (HUD click / mobile button); refused if not in the kit or empty (unless forced by a pickup) */
+  setBombType(index: number, force = false): boolean {
+    if (!this.bombKit.includes(index)) return false;
+    if (!force && (this.bombCounts[index] ?? 0) <= 0) return false;
+    this.bombType = index;
+    return true;
+  }
+
+  /** the sim tells us how many of each type we carry */
+  setBombCounts(counts: number[]): void {
+    this.bombCounts = counts;
+  }
+
+  /** the map's carried bombs (indices into BOMB_ORDER); selection resets to the first */
+  setBombKit(kit: number[]): void {
+    this.bombKit = kit.length ? [...kit] : BOMB_ORDER.map((_, i) => i);
+    if (!this.bombKit.includes(this.bombType)) this.bombType = this.bombKit[0];
   }
 
   /** the sim tells us which weapon is actually selected (locked ones are refused) */
@@ -108,12 +159,25 @@ export class InputSystem {
     if (t?.swap) this.cycleWeapon(1);
     if (t?.bombType) this.cycleBomb();
     if (t?.pause) this.pauseQueued = true;
+    if (t?.zoom) this.zoomToggle = true;
     this.touch = t;
   }
 
   takeDebugToggle(): boolean {
     const v = this.debugToggle;
     this.debugToggle = false;
+    return v;
+  }
+
+  /** TAKE button (HUD) / G: pick up the crate within reach */
+  queueTake(): void {
+    this.takeQueued = true;
+  }
+
+  /** consume a scope-zoom request (Z / + / - / middle click / ZOOM button) */
+  takeZoomToggle(): boolean {
+    const v = this.zoomToggle;
+    this.zoomToggle = false;
     return v;
   }
 
@@ -130,8 +194,18 @@ export class InputSystem {
     return p;
   }
 
-  /** @param playerScreen player position in virtual-canvas px (for mouse aim) */
-  sample(playerScreen: { x: number; y: number }): PlayerInput {
+  /**
+   * @param playerScreen player position in virtual-canvas px (for mouse aim)
+   * @param forced ignore the devices and send this instead (paused online, dead, lobby); seq still advances
+   */
+  sample(playerScreen: { x: number; y: number }, forced?: PlayerInput): PlayerInput {
+    if (forced) {
+      this.bombQueued = false;
+      this.bombHeld = false;
+      this.takeQueued = false;
+      this.takeHeld = false;
+      return { ...forced, seq: this.seq++ };
+    }
     const k = this.keys;
     let moveX: -1 | 0 | 1 = 0;
     if (k.has('ArrowLeft') || k.has('KeyA')) moveX = -1;
@@ -162,16 +236,21 @@ export class InputSystem {
       jet,
       fire,
       bomb: this.bombQueued,
+      take: this.takeQueued,
       aimAngle,
       weapon: this.weapon,
       bombType: this.bombType,
     };
     this.bombQueued = false;
+    this.takeQueued = false;
     if (this.override) Object.assign(input, this.override);
-    // rising edge only: holding bomb (injected input) must not spam
+    // rising edge only: holding bomb / take (injected input) must not spam
     const bombRaw = input.bomb;
     input.bomb = bombRaw && !this.bombHeld;
     this.bombHeld = bombRaw;
+    const takeRaw = input.take;
+    input.take = takeRaw && !this.takeHeld;
+    this.takeHeld = takeRaw;
     return input;
   }
 

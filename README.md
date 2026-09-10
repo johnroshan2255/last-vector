@@ -27,7 +27,7 @@ Other scripts:
 npm run build        # builds shared -> client -> server
 npm run typecheck    # tsc --noEmit across workspaces
 npm test             # shared-sim unit tests (vitest)
-npm run check        # headless Chrome: menus, weapons, aliens, mobile, 2-tab multiplayer
+npm run check        # headless Chrome: menus, settings, weapons, aliens, mobile, host/join + PvP multiplayer, 12-player cap
 npm run lint
 npm run format
 ```
@@ -37,7 +37,7 @@ npm run format
 - `shared/src/sim/` — the **entire game simulation** (`Match`): cave + colliders, players, six weapons, aliens, bombs, pickups, waves. Pure TypeScript + Rapier, no DOM. Emits `SimEvent`s and a `Snapshot`.
 - `client/` — engine + rendering only. A `MatchSource` feeds it: `LocalSource` (runs a Match in the browser for single-player) or `NetSource` (mirrors the Colyseus room). Views/FX never know which.
 - Netcode: the client predicts its own player with a dry-run `Match`, reconciles against the server's acknowledged input seq (rewind + replay, residual error blended out), and interpolates remote entities ~100 ms behind. `F3` debug overlay (ping, tick, patch Hz, prediction error), `F4` or `?lag=120` simulates latency.
-- `server/` — `ArenaRoom` runs the same `Match` authoritatively at 60 Hz, sanitises inputs, mirrors the snapshot into a Colyseus schema at 20 Hz and broadcasts destroyed-tile deltas + transient events.
+- `server/` — `ArenaRoom` runs the same `Match` authoritatively at 60 Hz, sanitises inputs, mirrors the snapshot into a Colyseus schema at 20 Hz and broadcasts destroyed-tile deltas + transient events. Rooms hold up to 12 pilots. **HOST GAME** creates a private room with a 5-letter code and a lobby (host presses START); **JOIN WITH CODE** resolves the code via `GET /rooms/:code` and joins by id; quick match fills public rooms. Players can shoot each other (kill feed, 3 s respawn with spawn shield).
 
 ## Build order
 

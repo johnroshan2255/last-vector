@@ -32,7 +32,7 @@ export const MAP_H = 112; // tiles
 export const WORLD_WIDTH = MAP_W * TILE_SIZE; // 3200 px
 export const WORLD_HEIGHT = MAP_H * TILE_SIZE; // 1792 px
 export const CHUNK_SIZE = 16; // tiles per chunk side (render culling granularity)
-export const GRAVITY = { x: 0, y: 40 }; // units/s²
+export const GRAVITY = { x: 0, y: 33 }; // units/s² (was 40: falls felt too heavy)
 
 // ---- Rendering ----
 // Virtual (low-res) canvas height in pixels. The canvas is upscaled with
@@ -105,6 +105,21 @@ export const BIOMES: Record<BiomeId, BiomePalette> = {
   },
 };
 
+/** how a map's cave is carved (see shared/src/maps.ts and sim/terrain.ts) */
+export interface TerrainStyle {
+  fillChance: number;
+  smoothSteps: number;
+  birthLimit: number;
+  deathLimit: number;
+  /**
+   * post-pass: caves = plain cellular automata; tunnels = worm tunnels through dense rock; open = huge voids with floating chunks;
+   * towers = vertical shafts + ledges; islands = open sky with floating slabs over a cavernous ground
+   */
+  layout: 'caves' | 'tunnels' | 'open' | 'towers' | 'islands';
+  /** fraction of the map height that is open sky (0 = sealed cave). Sky maps have no ceiling tiles; the world wall still holds. */
+  openTop?: number;
+}
+
 // ---- Player ----
 export const PLAYER = {
   // capsule: total height = 2 * (halfHeight + radius) = 1.2 tiles
@@ -113,8 +128,8 @@ export const PLAYER = {
   moveSpeed: 9, // units/s horizontal target speed
   groundAccel: 22, // how fast we reach target speed on the ground
   airAccel: 9, // ... and in the air
-  jetAccel: 75, // upward acceleration while thrusting (gravity is 40)
-  maxRise: 13, // clamp upward speed
+  jetAccel: 57.5, // upward acceleration while thrusting (gravity is 33 → net 24.5, 70% of the original 35)
+  maxRise: 9, // clamp upward speed (70% of the original 13)
   maxHealth: 100,
   fuelMax: 100,
   fuelDrain: 38, // per second while thrusting
@@ -142,7 +157,7 @@ export const BULLET = {
 } as const;
 
 export const GEL_BOMB = {
-  radius: 0.35,
+  radius: 0.24, // small: less than half a tile
   fuseSec: 1.2,
   blastRadius: 3.5, // tiles
   damage: 45,
@@ -231,11 +246,23 @@ export const REGROW = {
 // ---- Supply drops (weapon crates on parachutes) ----
 export const DROPS = {
   firstSec: 6,
-  intervalSec: 14,
+  /** a drop every 9 s, alternating weapon crate / bomb crate */
+  intervalSec: 9,
   fallSpeed: 2.4, // tiles/s under the chute
-  pickupRange: 0.95,
+  /** how close you must stand for the TAKE button to appear */
+  pickupRange: 1.3,
   landedLifeSec: 35,
-  maxLive: 4,
+  maxLive: 5,
+  /** bombs handed out per bomb crate */
+  bombsPerCrate: 2,
+} as const;
+
+// ---- Burning rock (flamer / fire pools set tiles alight; they crumble after burning) ----
+export const BURN = {
+  /** seconds a tile burns before it breaks */
+  tileSec: 0.7,
+  /** at most this many tiles alight at once (perf + sync) */
+  maxTiles: 48,
 } as const;
 
 // ---- Pickups / ore ----
@@ -252,6 +279,42 @@ export const PICKUPS = {
   lifetimeSec: 25,
 } as const;
 
+// ---- Player vs player (co-op rooms, Mini-Militia style) ----
+export const PVP = {
+  /** weapon damage against other players is scaled by this (aliens take full damage) */
+  damageScale: 0.7,
+  /** explosions: fraction of the blast damage dealt to other players / to the bomb's owner */
+  explosionScale: 0.6,
+  selfExplosionScale: 0.25,
+  /** seconds a dead player waits before respawning (online rooms only) */
+  respawnSec: 3,
+  /** spawn protection after (re)spawning: no damage taken, weapons still fire */
+  shieldSec: 2.5,
+  /** score for killing another player */
+  killScore: 50,
+} as const;
+
+// ---- EMP (slow blast that knocks jetpacks offline) ----
+export const EMP = {
+  /** seconds a pilot caught in the blast cannot use the jetpack */
+  jamSec: 10,
+} as const;
+
+// ---- Scope (per-weapon zoom levels 2x..7x, see WeaponDef.zoom) ----
+export const SCOPE = {
+  /** how much wider the view gets per scope level above 1: 2x → 1.25× view, 7x → 2.5× view (Mini-Militia levels, gentle steps) */
+  viewPerLevel: 0.25,
+  /** seconds-ish for the zoom to settle (exponential blend rate) */
+  blendRate: 9,
+} as const;
+/** view multiplier for a scope level (1 = normal) */
+export const scopeView = (level: number): number => 1 + Math.max(0, level - 1) * SCOPE.viewPerLevel;
+
 // ---- Rooms ----
 export const ROOM_NAME = 'arena';
-export const MAX_PLAYERS_PER_ROOM = 8;
+/** co-op room cap (host + 11 guests) */
+export const MAX_PLAYERS_PER_ROOM = 12;
+/** room codes players type to join a hosted game */
+export const ROOM_CODE_LENGTH = 5;
+export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
+export const MAX_NAME_LENGTH = 12;

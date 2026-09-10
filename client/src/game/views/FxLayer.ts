@@ -1,6 +1,6 @@
 import { Container, Graphics, Sprite, type Texture } from 'pixi.js';
 import { BEAM, BIOMES, PPU, TILE_SIZE, type BiomeId } from '@shared/constants';
-import { WEAPONS, HEAT } from '@shared/weapons';
+import { BOMBS, WEAPONS, HEAT } from '@shared/weapons';
 import type { SimEvent, Snapshot } from '@shared/sim/events';
 import { raycastGrid, type TileGrid } from '@shared/sim/terrain';
 import type { ParticleSystem } from '../systems/ParticleSystem';
@@ -181,12 +181,47 @@ export class FxLayer {
           if (near(e.x, e.y)) this.sfx('smoke');
           break;
         }
+        case 'fire': {
+          for (let i = 0; i < 46; i++) {
+            const a = Math.random() * Math.PI * 2;
+            const sp = 15 + Math.random() * 50;
+            this.particles.emit(e.x * PPU, e.y * PPU, Math.cos(a) * sp, Math.sin(a) * sp - 30, 0.6 + Math.random() * 0.9, i % 3 ? 0xff6a2b : 0xffe08a, 2 + Math.random() * 3, -0.15);
+          }
+          this.light(e.x, e.y, e.r * PPU * 1.4, 0.6, 0xff8a3d);
+          if (near(e.x, e.y)) this.sfx('flame');
+          break;
+        }
         case 'mineArmed':
           if (near(e.x, e.y)) this.sfx('mineArm');
           break;
         case 'dropSpawn':
-          this.burst(e.x, e.y, 10, 0xffffff, WEAPONS[e.weapon].color, 40, 0.5, 0);
+          this.burst(e.x, e.y, 10, 0xffffff, e.weapon ? WEAPONS[e.weapon].color : e.bomb ? BOMBS[e.bomb].color : 0xffffff, 40, 0.5, 0);
           if (near(e.x, e.y)) this.sfx('crate');
+          break;
+        case 'bombPickup':
+          if (e.id === localId) {
+            this.sfx('pickup');
+            this.toast(e.n > 0 ? `+${e.n} ${BOMBS[e.bomb].name}` : `${BOMBS[e.bomb].name} FULL`);
+          }
+          break;
+        case 'emp': {
+          // expanding violet ring + a crackle of sparks; jetpacks inside go dark
+          this.burst(e.x, e.y, 36, 0xf0e8ff, 0xb48cff, 90, 0.5, 0);
+          this.impact(e.x, e.y, 0xb48cff, e.r * PPU * 2.2, 0.35);
+          this.light(e.x, e.y, e.r * PPU * 1.6, 0.4, 0xb48cff);
+          for (let i = 0; i < 6; i++) {
+            const a1 = Math.random() * Math.PI * 2;
+            const a2 = a1 + (Math.random() - 0.5) * 1.2;
+            this.bolt({ x: e.x + Math.cos(a1) * e.r * 0.3, y: e.y + Math.sin(a1) * e.r * 0.3 }, { x: e.x + Math.cos(a2) * e.r, y: e.y + Math.sin(a2) * e.r }, 0xb48cff, 0xffffff, 0.18);
+          }
+          if (near(e.x, e.y)) {
+            this.sfx('arc');
+            this.shake(0.6, 0.15);
+          }
+          break;
+        }
+        case 'tileIgnite':
+          this.burst(e.x, e.y, 6, 0xfff0a0, 0xff8a3d, 30, 0.35, -0.2);
           break;
         case 'weaponPickup':
           if (e.id === localId) {
@@ -309,12 +344,33 @@ export class FxLayer {
   /** per-tick: jet trails from the snapshot, tracer/bolt ageing */
   update(dt: number, snap: Snapshot, time: number): void {
     void time;
+    // fire pools: embers and a little smoke keep rising
+    for (const c of snap.clouds) {
+      if (c.kind !== 'fire') continue;
+      for (let k = 0; k < 2; k++) {
+        if (Math.random() > 0.7) continue;
+        const x = c.x + (Math.random() - 0.5) * c.r * 1.6;
+        const ember = Math.random() < 0.75;
+        this.particles.emit(x * PPU, c.y * PPU + 2, (Math.random() - 0.5) * 10, -25 - Math.random() * 30, ember ? 0.35 + Math.random() * 0.4 : 0.9 + Math.random() * 0.6, ember ? (Math.random() < 0.5 ? 0xffb84f : 0xff6a2b) : 0x3a3f4a, ember ? 1 + Math.random() * 1.5 : 2 + Math.random() * 2, -0.25);
+      }
+    }
+    // burning rock: embers rise off each tile alight
+    for (const i of snap.burning) {
+      if (Math.random() > 0.5) continue;
+      const x = (i % this.grid.w) + Math.random();
+      const y = Math.floor(i / this.grid.w) + Math.random() * 0.4;
+      this.particles.emit(x * PPU, y * PPU, (Math.random() - 0.5) * 12, -18 - Math.random() * 22, 0.3 + Math.random() * 0.3, Math.random() < 0.4 ? 0xfff0a0 : 0xff8a3d, 1 + Math.random() * 2, -0.3);
+    }
     for (const a of snap.aliens) {
       if (a.burning && Math.random() < 0.6) {
         this.particles.emit(a.x * PPU + (Math.random() - 0.5) * 8, a.y * PPU - 4, (Math.random() - 0.5) * 10, -20 - Math.random() * 20, 0.3 + Math.random() * 0.2, Math.random() < 0.5 ? 0xff8a3d : 0xfff0a0, 1 + Math.random() * 2, -0.3);
       }
     }
     for (const p of snap.players) {
+      // a jammed pack sputters violet sparks
+      if (p.alive && p.jammed > 0 && Math.random() < 0.35) {
+        this.particles.emit((p.x - p.facing * 0.25) * PPU, (p.y - 0.1) * PPU, (Math.random() - 0.5) * 30, -10 - Math.random() * 20, 0.2 + Math.random() * 0.2, Math.random() < 0.5 ? 0xb48cff : 0xffffff, 1, 0.2);
+      }
       if (!p.thrusting || !p.alive) continue;
       for (let i = 0; i < 2; i++) {
         this.particles.emit(
@@ -359,12 +415,67 @@ export class FxLayer {
     this.particles.update(dt);
   }
 
+  /** per-player lightning path, re-rolled ~20 times a second so the bolt crackles instead of wobbling */
+  private boltCache = new Map<string, { bucket: number; pts: { x: number; y: number }[]; forks: { x: number; y: number }[][] }>();
+
+  private lightningPath(id: string, ox: number, oy: number, ex: number, ey: number, time: number, hot: number) {
+    const bucket = Math.floor(time * 20);
+    const c = this.boltCache.get(id);
+    if (c && c.bucket === bucket && c.pts.length) {
+      // keep the shape, but pin the ends to the live positions
+      c.pts[0].x = ox;
+      c.pts[0].y = oy;
+      c.pts[c.pts.length - 1].x = ex;
+      c.pts[c.pts.length - 1].y = ey;
+      return c;
+    }
+    const dx = ex - ox;
+    const dy = ey - oy;
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len;
+    const ny = dx / len;
+    const segs = Math.max(4, Math.min(26, Math.round(len / 9)));
+    const pts = [{ x: ox, y: oy }];
+    let off = 0;
+    for (let i = 1; i < segs; i++) {
+      const t = i / segs;
+      // random walk across the line, pulled back toward it so it never drifts off
+      off += (Math.random() * 2 - 1) * (4 + hot * 4) - off * 0.35;
+      const amp = Math.min(9, len * 0.08);
+      const j = Math.max(-amp, Math.min(amp, off)) * Math.sin(t * Math.PI) ** 0.5;
+      pts.push({ x: ox + dx * t + nx * j, y: oy + dy * t + ny * j });
+    }
+    pts.push({ x: ex, y: ey });
+    // forks: short branches that peel off the main bolt and fade
+    const forks: { x: number; y: number }[][] = [];
+    const nForks = 1 + Math.floor(Math.random() * 2) + (hot > 0.5 ? 1 : 0);
+    for (let k = 0; k < nForks; k++) {
+      const i = 1 + Math.floor(Math.random() * (pts.length - 2));
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const f = [{ x: pts[i].x, y: pts[i].y }];
+      let fx = pts[i].x;
+      let fy = pts[i].y;
+      const flen = 2 + Math.floor(Math.random() * 3);
+      for (let s = 0; s < flen; s++) {
+        fx += (dx / len) * (5 + Math.random() * 6) + nx * side * (4 + Math.random() * 6);
+        fy += (dy / len) * (5 + Math.random() * 6) + ny * side * (4 + Math.random() * 6);
+        f.push({ x: fx, y: fy });
+      }
+      forks.push(f);
+    }
+    const entry = { bucket, pts, forks };
+    this.boltCache.set(id, entry);
+    return entry;
+  }
+
   /** per-frame drawing: beams from snapshot, tracers, bolts */
   draw(snap: Snapshot, time: number): void {
     const g = this.gfx;
     g.clear();
+    const live = new Set<string>();
     for (const p of snap.players) {
       if (!p.beamOn || !p.alive) continue;
+      live.add(p.id);
       const d = WEAPONS.vector;
       const m = { x: p.x + Math.cos(p.aimAngle) * BEAM.muzzleOffset, y: p.y + Math.sin(p.aimAngle) * BEAM.muzzleOffset };
       const ox = m.x * PPU;
@@ -372,25 +483,33 @@ export class FxLayer {
       const ex = p.beamEndX * PPU;
       const ey = p.beamEndY * PPU;
       const hot = p.heat / HEAT.max;
-      g.moveTo(ox, oy).lineTo(ex, ey).stroke({ width: 11, color: hot > 0.6 ? 0xff4fd8 : d.color, alpha: 0.14 + hot * 0.14 });
-      g.moveTo(ox, oy).lineTo(ex, ey).stroke({ width: 5, color: d.color, alpha: 0.4 });
-      g.moveTo(ox, oy).lineTo(ex, ey).stroke({ width: 2, color: d.color, alpha: 0.8 });
-      const dx = ex - ox;
-      const dy = ey - oy;
-      const len = Math.hypot(dx, dy) || 1;
-      const nx = -dy / len;
-      const ny = dx / len;
-      const segs = Math.max(2, Math.min(10, Math.floor(len / 24)));
-      g.moveTo(ox, oy);
-      for (let i = 1; i < segs; i++) {
-        const t = i / segs;
-        const j = Math.sin(time * 40 + i * 1.7) * 1.2 * (0.5 + hot);
-        g.lineTo(ox + dx * t + nx * j, oy + dy * t + ny * j);
+      const { pts, forks } = this.lightningPath(p.id, ox, oy, ex, ey, time, hot);
+      const glow = hot > 0.6 ? 0xff4fd8 : 0x6fb8ff;
+      const poly = (path: { x: number; y: number }[]) => {
+        g.moveTo(path[0].x, path[0].y);
+        for (let i = 1; i < path.length; i++) g.lineTo(path[i].x, path[i].y);
+      };
+      // wide soft halo, electric-blue body, white-hot core: the Thor look
+      poly(pts);
+      g.stroke({ width: 12, color: glow, alpha: 0.12 + hot * 0.1 });
+      poly(pts);
+      g.stroke({ width: 5, color: d.color, alpha: 0.45 });
+      poly(pts);
+      g.stroke({ width: 2.2, color: 0xdff6ff, alpha: 0.9 });
+      poly(pts);
+      g.stroke({ width: 1, color: 0xffffff, alpha: 1 });
+      for (const f of forks) {
+        poly(f);
+        g.stroke({ width: 3, color: d.color, alpha: 0.35 });
+        poly(f);
+        g.stroke({ width: 1, color: 0xffffff, alpha: 0.85 });
       }
-      g.lineTo(ex, ey).stroke({ width: 1, color: d.coreColor, alpha: 0.95 });
-      // impact glow
-      g.circle(ex, ey, 5 + Math.sin(time * 30)).fill({ color: d.color, alpha: 0.35 });
+      // muzzle spark and impact flash
+      g.circle(ox, oy, 2.5 + Math.random() * 1.5).fill({ color: 0xffffff, alpha: 0.9 });
+      g.circle(ex, ey, 9 + Math.random() * 4).fill({ color: glow, alpha: 0.3 });
+      g.circle(ex, ey, 4 + Math.random() * 2).fill({ color: 0xffffff, alpha: 0.95 });
     }
+    for (const id of this.boltCache.keys()) if (!live.has(id)) this.boltCache.delete(id);
     for (const t of this.tracers) {
       const sp = Math.hypot(t.vx, t.vy) || 1;
       const tail = t.rocket ? 6 : Math.min(14, 4 + sp * 0.12);

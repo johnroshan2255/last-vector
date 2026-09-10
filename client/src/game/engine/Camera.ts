@@ -69,9 +69,11 @@ export class Camera {
     return Math.round(this.y + this.oy - this.vh / 2);
   }
 
-  apply(world: Container): void {
-    world.x = -this.left;
-    world.y = -this.top;
+  /** @param zoom world scale (0.5 = scope view: twice as much cave on screen) */
+  apply(world: Container, zoom = 1): void {
+    world.scale.set(zoom);
+    world.x = -this.left * zoom;
+    world.y = -this.top * zoom;
   }
 
   screenToWorld(sx: number, sy: number): { x: number; y: number } {

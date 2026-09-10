@@ -14,3 +14,4 @@ export * from './sim/pickups.js';
 export * from './sim/waves.js';
 export * from './sim/drops.js';
 export * from './sim/match.js';
+export * from './maps.js';

@@ -1,4 +1,5 @@
 import { Texture } from 'pixi.js';
+import { WEAPONS, BOMBS, type WeaponId, type BombType } from '@shared/weapons';
 
 type Rect = [number, number, number, number];
 
@@ -181,4 +182,227 @@ export function glowTexture(): Texture {
   const t = Texture.from(c);
   t.source.scaleMode = 'nearest';
   return t;
+}
+
+// ---------------------------------------------------------------- weapons (pixel silhouettes)
+// Each weapon is a 16x7 pixel map. Legend: '#' body dark, '=' body light, 'c' weapon colour,
+// 'w' core/white, 'g' grip. The same map paints the held gun, the parachute drop and the HUD icon.
+
+const WEAPON_MAPS: Record<WeaponId, string[]> = {
+  blaster: [
+    '................',
+    '....#######.....',
+    '..==#######cw...',
+    '..==####==......',
+    '....g#..........',
+    '....gg..........',
+    '................',
+  ],
+  vector: [
+    '......###.......',
+    '..==######ccccw.',
+    '..==###ww#ccccw.',
+    '..==######ccccw.',
+    '....g###........',
+    '....gg..........',
+    '................',
+  ],
+  scatter: [
+    '................',
+    '.###############',
+    '.=====########c.',
+    '..#####=========',
+    '....g#..........',
+    '...gg...........',
+    '................',
+  ],
+  vulcan: [
+    '.....#..........',
+    '..###############',
+    '..#c#===========',
+    '..###############',
+    '..###===========',
+    '....gg#.........',
+    '.....gg.........',
+  ],
+  sniper: [
+    '.......c........',
+    '.####c#c#######w',
+    '.====######=====',
+    '..###ww#########',
+    '....g#.....##...',
+    '...gg......#.#..',
+    '................',
+  ],
+  emp: [
+    '.....ccc........',
+    '..####c#c###....',
+    '..==##cwc###cc..',
+    '..####c#c###c...',
+    '....g#..........',
+    '....gg..........',
+    '................',
+  ],
+  plasma: [
+    '................',
+    '..#####c#c#.....',
+    '..==#####cccw...',
+    '..==#####c#c#...',
+    '....g#..........',
+    '....gg..........',
+    '................',
+  ],
+  flamer: [
+    '..ccc...........',
+    '..ccc####.......',
+    '..ccc#####==#cc.',
+    '..ccc#####==#ww.',
+    '....g###........',
+    '....gg..........',
+    '................',
+  ],
+  arc: [
+    '.........c...c..',
+    '..#######c#c#c#.',
+    '..==#####cwcwcw.',
+    '..==#####c#c#c#.',
+    '....g#...c...c..',
+    '....gg..........',
+    '................',
+  ],
+  rail: [
+    '................',
+    '.#####c#c#c#c###',
+    '.====##########w',
+    '..###c#c#c#c#===',
+    '....g#..........',
+    '...gg...........',
+    '................',
+  ],
+  launcher: [
+    '................',
+    '.cccccccccccccc.',
+    '.c############w.',
+    '.c===========#w.',
+    '.cccccccccccccc.',
+    '.....g##........',
+    '.....gg.........',
+  ],
+};
+
+function paintMap(ctx: CanvasRenderingContext2D, rows: string[], palette: Record<string, string>): void {
+  rows.forEach((row, y) => {
+    for (let x = 0; x < row.length; x++) {
+      const col = palette[row[x]];
+      if (!col) continue;
+      ctx.fillStyle = col;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  });
+}
+
+function weaponPalette(id: WeaponId): Record<string, string> {
+  const w = WEAPONS[id];
+  return { '#': '#2a2f3d', '=': '#46586b', c: hex(w.color), w: hex(w.coreColor), g: '#5c4a3d' };
+}
+
+function weaponCanvas(id: WeaponId): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = 16;
+  c.height = 7;
+  paintMap(c.getContext('2d')!, WEAPON_MAPS[id], weaponPalette(id));
+  return c;
+}
+
+/** one 16x7 texture per weapon (held gun + parachute drops) */
+export function weaponTextures(): Record<WeaponId, Texture> {
+  const out = {} as Record<WeaponId, Texture>;
+  for (const id of Object.keys(WEAPON_MAPS) as WeaponId[]) {
+    const t = Texture.from(weaponCanvas(id));
+    t.source.scaleMode = 'nearest';
+    out[id] = t;
+  }
+  return out;
+}
+
+const iconCache = new Map<string, string>();
+/** data-URL of the weapon silhouette for the HUD / settings (upscaled, crisp) */
+export function weaponIconUrl(id: WeaponId, scale = 4): string {
+  const key = `${id}:${scale}`;
+  let url = iconCache.get(key);
+  if (url) return url;
+  const src = weaponCanvas(id);
+  const c = document.createElement('canvas');
+  c.width = src.width * scale;
+  c.height = src.height * scale;
+  const ctx = c.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(src, 0, 0, c.width, c.height);
+  url = c.toDataURL();
+  iconCache.set(key, url);
+  return url;
+}
+
+// ---------------------------------------------------------------- fire
+/** three 7x11 flame frames: dark-orange skirt, orange body, yellow tongue, white heart */
+const FLAME_MAPS: string[][] = [
+  ['...y...', '...y...', '..yy...', '..yyo..', '.yyoo..', '.yooow.', 'yoooww.', 'yoowwo.', 'yooowo.', '.ooooo.', '..rrr..'],
+  ['.......', '....y..', '...yy..', '...yo..', '..yyoo.', '..yoow.', '.yooww.', '.yowwoo', '.oooow.', '.ooooo.', '..rrr..'],
+  ['..y....', '..y....', '..yy...', '.yyo...', '.yyoo..', '.yooo..', 'yoowwo.', 'yowwoo.', '.ooowo.', '.ooooo.', '..rrr..'],
+];
+export function flameTextures(): Texture[] {
+  return FLAME_MAPS.map((rows) => {
+    const c = document.createElement('canvas');
+    c.width = 7;
+    c.height = 11;
+    paintMap(c.getContext('2d')!, rows, { r: '#b3300f', o: '#ff6a2b', y: '#ffb84f', w: '#fff3c0' });
+    const t = Texture.from(c);
+    t.source.scaleMode = 'nearest';
+    return t;
+  });
+}
+
+// ---------------------------------------------------------------- bombs
+/** 5x4 pixel maps: bombs are small (less than a third of a tile) */
+const BOMB_MAPS: Record<BombType, string[]> = {
+  gel: ['.ccc.', 'cwccc', 'ccccc', '.ccc.'],
+  mine: ['..c..', '.###.', '#=c=#', '#####'],
+  smoke: ['..c..', '.###.', '#===#', '#####'],
+  cluster: ['c.c.c', '.ccc.', 'cwccc', '.ccc.'],
+  impact: ['..c..', '.ccc.', '.cwc.', '.#.#.'],
+  heavy: ['.ccc.', 'ccwcc', 'ccccc', '.ccc.'],
+  bomblet: ['.cc..', 'cwc..', '.cc..', '.....'],
+};
+
+/** 5x4 bomb sprite per type (thrown bombs) */
+export function bombTexture(type: BombType): Texture {
+  const d = BOMBS[type];
+  const c = document.createElement('canvas');
+  c.width = 5;
+  c.height = 4;
+  paintMap(c.getContext('2d')!, BOMB_MAPS[type], { '#': '#2a2f3d', '=': '#46586b', c: hex(d.color), w: '#ffffff' });
+  const t = Texture.from(c);
+  t.source.scaleMode = 'nearest';
+  return t;
+}
+
+/** data-URL bomb icon for the HUD / settings */
+export function bombIconUrl(type: BombType, scale = 4): string {
+  const key = `bomb:${type}:${scale}`;
+  let url = iconCache.get(key);
+  if (url) return url;
+  const d = BOMBS[type];
+  const src = document.createElement('canvas');
+  src.width = 5;
+  src.height = 4;
+  paintMap(src.getContext('2d')!, BOMB_MAPS[type], { '#': '#2a2f3d', '=': '#46586b', c: hex(d.color), w: '#ffffff' });
+  const c = document.createElement('canvas');
+  c.width = src.width * scale;
+  c.height = src.height * scale;
+  const ctx = c.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(src, 0, 0, c.width, c.height);
+  url = c.toDataURL();
+  iconCache.set(key, url);
+  return url;
 }

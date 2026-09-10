@@ -2,22 +2,61 @@ import { Room, type Client } from 'colyseus';
 import type { MapSchema } from '@colyseus/schema';
 import RAPIER from '@dimforge/rapier2d-compat';
 import { ArenaState, PlayerState, AlienState, BombState, PickupState, DropState, CloudState } from './ArenaState.js';
-import { FIXED_DT, MAX_PLAYERS_PER_ROOM, NET_PATCH_RATE, TICK_RATE, BIOMES, type BiomeId } from '../../../shared/src/constants.js';
-import { ClientMessage, ServerMessage } from '../../../shared/src/types.js';
+import {
+  FIXED_DT,
+  MAX_NAME_LENGTH,
+  MAX_PLAYERS_PER_ROOM,
+  NET_PATCH_RATE,
+  ROOM_CODE_ALPHABET,
+  ROOM_CODE_LENGTH,
+  TICK_RATE,
+} from '../../../shared/src/constants.js';
+import { DEFAULT_MAP, MAPS, isMapId, type MapId } from '../../../shared/src/maps.js';
+import { ClientMessage, ServerMessage, type JoinOptions, type WelcomeMessage } from '../../../shared/src/types.js';
 import { Match } from '../../../shared/src/sim/match.js';
 import type { SimEvent, Snapshot } from '../../../shared/src/sim/events.js';
 
-interface JoinOptions {
-  biome?: string;
-  seed?: number;
+let rapierReady: Promise<unknown> | null = null;
+
+/** codes currently in use on this process (avoid handing out duplicates) */
+const liveCodes = new Set<string>();
+
+export function makeRoomCode(): string {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    let code = '';
+    for (let i = 0; i < ROOM_CODE_LENGTH; i++) code += ROOM_CODE_ALPHABET[Math.floor(Math.random() * ROOM_CODE_ALPHABET.length)];
+    if (!liveCodes.has(code)) return code;
+  }
+  return Date.now().toString(36).toUpperCase().slice(-ROOM_CODE_LENGTH);
 }
 
-let rapierReady: Promise<unknown> | null = null;
+/** what a client may call itself: printable, trimmed, capped */
+export function sanitiseName(raw: unknown, fallback: string): string {
+  if (typeof raw !== 'string') return fallback;
+  const clean = raw
+    .replace(/[^\x20-\x7e]/g, '')
+    .trim()
+    .slice(0, MAX_NAME_LENGTH)
+    .toUpperCase();
+  return clean || fallback;
+}
+
+export function defaultName(sessionId: string): string {
+  return `PILOT-${sessionId.replace(/[^a-z0-9]/gi, '').slice(0, 4).toUpperCase()}`;
+}
 
 /**
  * Authoritative arena. Runs the shared Match at TICK_RATE, applies sanitised
  * client inputs, mirrors the snapshot into the schema at NET_PATCH_RATE and
  * broadcasts transient events + destroyed tiles as messages.
+ *
+ * Two flavours share this class:
+ *  - quick match: public, starts immediately, joinOrCreate fills it up
+ *  - hosted:      private (never matched by quick play), found only through
+ *                 its room code (`GET /rooms/:code` → joinById); waits in a
+ *                 lobby (no waves / drops) until the host sends Start.
+ * Both hold up to MAX_PLAYERS_PER_ROOM (12) players; players can hurt each
+ * other and respawn a few seconds after dying.
  */
 export class ArenaRoom extends Room<ArenaState> {
   maxClients = MAX_PLAYERS_PER_ROOM;
@@ -29,15 +68,36 @@ export class ArenaRoom extends Room<ArenaState> {
   private pendingRestored: number[] = [];
   private acc = 0;
   private last = 0;
+  private code = '';
+  /** hosted rooms may opt out of alien waves (pure PvP / tests) */
+  private wavesOnStart = true;
+  /** hosted (private, code) room: closes when the host leaves. Quick-match rooms hand the host role over instead. */
+  private hosted = false;
+  private closing = false;
 
   async onCreate(options: JoinOptions): Promise<void> {
     rapierReady ??= RAPIER.init();
     await rapierReady;
-    const biome = (options?.biome && options.biome in BIOMES ? options.biome : 'verdant') as BiomeId;
+    const map: MapId = isMapId(options?.map) ? options.map : DEFAULT_MAP;
+    const biome = MAPS[map].biome;
     const seed = typeof options?.seed === 'number' && Number.isFinite(options.seed) ? options.seed >>> 0 : (Math.random() * 2 ** 32) >>> 0;
-    this.match = new Match(RAPIER, { seed, biome });
+    const hosted = options?.mode === 'host';
+    this.hosted = hosted;
+    this.match = new Match(RAPIER, { seed, map, respawn: true });
+    this.code = makeRoomCode();
+    liveCodes.add(this.code);
     this.state.seed = seed;
     this.state.biome = biome;
+    this.state.map = map;
+    this.state.code = this.code;
+    this.state.maxPlayers = MAX_PLAYERS_PER_ROOM;
+    this.state.started = !hosted;
+    // a hosted room sits in its lobby: no waves, no crates until the host starts
+    this.wavesOnStart = !(hosted && options?.waves === false);
+    this.match.wavesEnabled = !hosted;
+    this.match.dropsEnabled = !hosted;
+    await this.setMetadata({ code: this.code, biome, map, started: !hosted });
+    if (hosted) await this.setPrivate(true);
     this.setPatchRate(1000 / NET_PATCH_RATE);
 
     this.onMessage(ClientMessage.Input, (client, raw) => {
@@ -49,34 +109,68 @@ export class ArenaRoom extends Room<ArenaState> {
     });
     this.onMessage(ClientMessage.Ready, () => {});
     this.onMessage(ClientMessage.Ping, (client, t: number) => client.send(ServerMessage.Pong, t));
+    this.onMessage(ClientMessage.Start, (client) => {
+      if (client.sessionId !== this.state.hostId || this.state.started) return;
+      this.start();
+    });
 
     this.last = Date.now();
     this.setSimulationInterval(() => this.tick(), 1000 / TICK_RATE);
     this.clock.setInterval(() => this.inputCount.clear(), 1000);
-    console.log(`[arena ${this.roomId}] created seed=${seed} biome=${biome}`);
+    console.log(`[arena ${this.roomId}] created code=${this.code} seed=${seed} map=${map} ${hosted ? 'hosted (lobby)' : 'quick'}`);
   }
 
-  onJoin(client: Client): void {
+  /** leave the lobby: waves and supply drops begin */
+  private start(): void {
+    this.state.started = true;
+    this.match.wavesEnabled = this.wavesOnStart;
+    this.match.dropsEnabled = true;
+    void this.setMetadata({ code: this.code, biome: this.state.biome, map: this.state.map, started: true });
+    console.log(`[arena ${this.roomId}] started by host ${this.state.hostId}`);
+  }
+
+  onJoin(client: Client, options?: JoinOptions): void {
     this.match.addPlayer(client.sessionId);
-    this.state.players.set(client.sessionId, new PlayerState());
-    client.send(ServerMessage.Welcome, {
+    const ps = new PlayerState();
+    ps.name = sanitiseName(options?.name, defaultName(client.sessionId));
+    this.state.players.set(client.sessionId, ps);
+    if (!this.state.hostId) this.state.hostId = client.sessionId;
+    const welcome: WelcomeMessage = {
       id: client.sessionId,
       seed: this.match.seed,
       biome: this.match.biome,
       destroyed: this.match.destroyedLog,
       tick: this.match.tick,
-    });
-    console.log(`[arena ${this.roomId}] join ${client.sessionId} (${this.clients.length})`);
+      code: this.code,
+      maxPlayers: MAX_PLAYERS_PER_ROOM,
+      map: this.match.map.id,
+    };
+    client.send(ServerMessage.Welcome, welcome);
+    console.log(`[arena ${this.roomId}] join ${client.sessionId} "${ps.name}" (${this.clients.length}/${this.maxClients})`);
   }
 
   onLeave(client: Client): void {
     this.match.removePlayer(client.sessionId);
     this.state.players.delete(client.sessionId);
     this.inputCount.delete(client.sessionId);
+    if (this.state.hostId === client.sessionId && !this.closing) {
+      if (this.hosted) {
+        // the host's room dies with them: tell everyone why, then drop them (a guest leaving changes nothing)
+        this.closing = true;
+        this.broadcast(ServerMessage.HostLeft);
+        console.log(`[arena ${this.roomId}] host left → closing (${this.clients.length} remaining)`);
+        void this.disconnect();
+      } else {
+        // public quick-match room: hand the role to whoever has been here longest
+        const next = this.clients.find((c) => c.sessionId !== client.sessionId);
+        this.state.hostId = next?.sessionId ?? '';
+      }
+    }
     console.log(`[arena ${this.roomId}] leave ${client.sessionId} (${this.clients.length})`);
   }
 
   onDispose(): void {
+    liveCodes.delete(this.code);
     this.match.destroy();
   }
 
@@ -147,9 +241,13 @@ export class ArenaRoom extends Room<ArenaState> {
       ps.beamEndX = p.beamEndX;
       ps.beamEndY = p.beamEndY;
       ps.kills = p.kills;
+      ps.deaths = p.deaths;
       ps.shards = p.shards;
       ps.score = p.score;
       ps.lastSeq = p.lastSeq;
+      ps.jammed = p.jammed;
+      const nd = p.nearDrop ? (p.nearDrop.weapon ? `w:${p.nearDrop.weapon}` : p.nearDrop.bomb ? `b:${p.nearDrop.bomb}` : '') : '';
+      if (ps.nearDrop !== nd) ps.nearDrop = nd;
     }
     syncMap(st.aliens, s.aliens, () => new AlienState(), (a, v) => {
       a.kind = v.kind;
@@ -167,13 +265,17 @@ export class ArenaRoom extends Room<ArenaState> {
       b.fuse = v.fuse;
       b.armed = v.armed;
     });
+    const burning = s.burning.join(',');
+    if (st.burning !== burning) st.burning = burning;
     syncMap(st.drops, s.drops, () => new DropState(), (d, v) => {
-      d.weapon = v.weapon;
+      d.weapon = v.weapon ?? '';
+      d.bomb = v.bomb ?? '';
       d.x = v.x;
       d.y = v.y;
       d.landed = v.landed;
     });
     syncMap(st.clouds, s.clouds, () => new CloudState(), (c, v) => {
+      c.kind = v.kind;
       c.x = v.x;
       c.y = v.y;
       c.r = v.r;

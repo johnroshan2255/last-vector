@@ -161,6 +161,54 @@ Flamer / Rail / Plasma, two weapon slots fed by parachute supply drops, Gel / Mi
 terrain regrowth (~4 s, never entombs a player), humanoid astronaut (head / torso / animated legs / aiming arm), 2D lighting.
 Verified: 21 sim tests, 67–69 headless checks per viewport, 20 multiplayer checks, 60 fps.
 
+## Step 9c — Host / join, 12-player co-op, friendly fire (added 2026-09-10)  ✅ done
+
+Hosted private rooms with 5-letter codes + lobby (host starts, host hand-off), `GET /rooms/:code` lookup, quick match kept as a
+link, `MAX_PLAYERS_PER_ROOM = 12`, PvP damage / kill credit / kill feed / respawn with spawn shield, callsigns. Menu redesign:
+sparse title panel + settings cog (General / Weapons / Bombs / Controls); in-game cog replaces the mobile "II" button.
+Verified: 27 sim tests, 89 headless checks per desktop viewport, 46 two-tab multiplayer checks (host → wrong code → join by
+code → lobby → start → duel → kill feed → respawn → pause overlay), 8 capacity checks with 12 Node clients (13th refused).
+
+## Step 9d — Weapon-shaped drops, six bomb types (added 2026-09-10)  ✅ done
+
+Supply drops carry the weapon silhouette (per-weapon pixel maps shared by the held gun, the drop and the HUD/settings icons)
+instead of a crate. Bombs: Gel / Mine / Smoke / Cluster (bomblets) / Impact (contact) / Napalm (fire pool = `CloudSnap.kind
+'fire'`, burns aliens and players). Bomb counts are `number[]` in `BOMB_ORDER` order everywhere (sim, schema, HUD).
+Verified: 31 sim tests; headless checks for cluster split, impact detonation, napalm pool, 6 HUD counters, icons.
+
+## Step 9e — Host-left handling, jetpack tuning (added 2026-09-10)  ✅ done
+
+Hosted rooms close when the host leaves (`ServerMessage.HostLeft` → guests see a notice on the main menu); guests leaving
+change nothing. Jetpack thrust / climb reduced to 70%. Verified: 49 multiplayer checks (guest leave, rejoin by code mid-match,
+host leave → notice + menu + code 404), 9 capacity checks (10 guests all told + dropped).
+
+## Step 9f — Four maps, sniper, swap fix (added 2026-09-10)  ✅ done
+
+`shared/src/maps.ts`: Hollow / Furnace / Rift / Glacier with terrain layouts (caves / tunnels / open / towers), a 4th palette
+(Frost), per-map drop pools and bomb kits; menu map cards; rooms matched per map. New Sniper weapon. Multiplayer weapon-swap
+flip-flop fixed: slot selection is client-owned in reconciliation (only a loadout change adopts the server's slot); wheel input
+accumulates to one notch and swaps are rate-limited to one per 150 ms. Verified: 32 sim tests, map sweep + swap checks under 200 ms lag.
+
+## Step 9g — Sky maps (added 2026-09-10)  ✅ done
+
+Rift and Glacier became open-air maps and DUNES (desert, pyramid) was added: `terrain.openTop` leaves the sky unsealed, new
+layouts `islands` / `pillars` / `surface`, a Sand palette, `MapDef.sky` (gradient, sun/moon, stars, clouds, horizon
+silhouettes on parallax), daylight ambient. Verified: 5-map sweep in the harness (sky maps have open tops, caves a ceiling),
+32 sim tests, 60 fps on every map.
+
+## Step 9h — Enemy arrows, scope zoom, map trim (added 2026-09-10)  ✅ done
+
+Glacier + Dunes removed (3 maps). `IndicatorLayer`: name tags over other pilots, edge arrows (name + distance) for pilots out
+of view, red arrows for the nearest off-screen aliens. Scope zoom (Z / +/- / MMB / ZOOM button): world scale 0.5 with camera,
+culling, mouse aim and light-shader compensation. Verified in the harness (zoom view doubles at 60 fps, arrows land on the
+screen edge, name tag + arrow for the other pilot online).
+
+## Step 9i — Bomb crates, fire mine, burning rock (added 2026-09-10)  ✅ done
+
+Supply drops alternate weapon crates and bomb crates (+2 of a kit type); bomb regen removed; bombs shrunk (0.24 radius, 5×4
+sprites); the mine became a Fire Mine (sticks, then a burning pool on proximity); the Flamer ignites rock tiles which crumble
+after 0.7 s (`Snapshot.burning`, synced). Verified: 36 sim tests; harness checks for crate refills, fire mine pool, burning rock.
+
 ## Step 10 — CrazyGames integration, polish, ship
 
 **Goal:** A submittable build and a deployed server.
@@ -193,7 +241,9 @@ after 4 world rebuilds).
 `npm run probe http://<host>:5173 [chromium|webkit]` loads a *running* server exactly like a device would (no test params) at
 laptop/phone sizes, clicks PLAY and reports fps, console errors and render-loop errors. Use it first when someone reports a blank screen.
 
-`npm test` runs the shared-sim vitest suite (terrain determinism, headless Match: movement, every weapon, bombs, kills, arc chaining, waves, two-player tile log replay, input sanitising).
+`npm test` runs the shared-sim vitest suite (terrain determinism, headless Match: movement, every weapon, bombs, kills, arc chaining, waves, two-player tile log replay, input sanitising, player-vs-player damage / kill credit / respawn / spawn shield).
+
+`npm run check -- --only=multiplayer` runs only the two-tab host/join/PvP scenario plus the 12-client capacity test; `--only=capacity` runs just the Node-client capacity test (add `--verbose` for progress).
 
 Every step is checked with the headless-Chrome harness: `npm run check` (all viewports),
 `npm run check -- --only=mobile --biome=ember`, etc. It reports fps, collider/sprite counts,

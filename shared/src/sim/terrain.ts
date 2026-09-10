@@ -1,4 +1,4 @@
-import { MAP_H, MAP_W, ORE_CHANCE, TERRAIN } from '../constants.js';
+import { MAP_H, MAP_W, ORE_CHANCE, TERRAIN, type TerrainStyle } from '../constants.js';
 import { Rng } from './rng.js';
 
 export const TILE_AIR = 0;
@@ -155,21 +155,31 @@ export interface TerrainResult {
   spawn: { x: number; y: number };
 }
 
+export const DEFAULT_STYLE: TerrainStyle = { fillChance: TERRAIN.fillChance, smoothSteps: TERRAIN.smoothSteps, birthLimit: TERRAIN.birthLimit, deathLimit: TERRAIN.deathLimit, layout: 'caves' };
+
 /**
- * Cellular-automata cave. Deterministic for a given seed.
+ * Cellular-automata cave, then a per-map layout pass (tunnels / open voids /
+ * shafts + ledges). Deterministic for a given seed + style.
  */
-export function generateTerrain(seed: number, w = MAP_W, h = MAP_H): TerrainResult {
+export function generateTerrain(seed: number, w = MAP_W, h = MAP_H, style: TerrainStyle = DEFAULT_STYLE): TerrainResult {
   const rng = new Rng(seed);
   const grid = new TileGrid(w, h);
-  const { fillChance, smoothSteps, birthLimit, deathLimit, spawnPocketRadius, borderThickness } =
-    TERRAIN;
+  const { fillChance, smoothSteps, birthLimit, deathLimit } = style;
+  const { spawnPocketRadius, borderThickness } = TERRAIN;
+  // sky maps: everything above skyRow starts as air (no ceiling); the ground gets a solid crust so the surface reads as ground
+  const skyRow = style.openTop ? Math.floor(h * style.openTop) : 0;
+  const crust = skyRow ? 3 : 0;
 
   // 1. random fill
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const border =
-        x < borderThickness || y < borderThickness || x >= w - borderThickness || y >= h - borderThickness;
-      grid.tiles[grid.idx(x, y)] = border || rng.chance(fillChance) ? TILE_ROCK : TILE_AIR;
+      const border = x < borderThickness || (y < borderThickness && !skyRow) || x >= w - borderThickness || y >= h - borderThickness;
+      let solid = border || rng.chance(fillChance);
+      if (skyRow) {
+        if (y < skyRow) solid = border;
+        else if (y < skyRow + crust) solid = true;
+      }
+      grid.tiles[grid.idx(x, y)] = solid ? TILE_ROCK : TILE_AIR;
     }
   }
 
@@ -179,6 +189,10 @@ export function generateTerrain(seed: number, w = MAP_W, h = MAP_H): TerrainResu
   for (let step = 0; step < smoothSteps; step++) {
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
+        if (skyRow && y < skyRow + crust) {
+          next[y * w + x] = cur[y * w + x]; // sky and crust are not smoothed
+          continue;
+        }
         let n = 0;
         for (let dy = -1; dy <= 1; dy++) {
           for (let dx = -1; dx <= 1; dx++) {
@@ -197,17 +211,20 @@ export function generateTerrain(seed: number, w = MAP_W, h = MAP_H): TerrainResu
   }
   grid.tiles.set(cur);
 
-  // 3. seal border
+  // 2b. layout pass
+  applyLayout(grid, rng, style.layout, borderThickness, skyRow);
+
+  // 3. seal border (sky maps keep the top open: the physics world wall holds players in)
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      if (x < borderThickness || y < borderThickness || x >= w - borderThickness || y >= h - borderThickness) {
+      if (x < borderThickness || (y < borderThickness && !skyRow) || x >= w - borderThickness || y >= h - borderThickness) {
         grid.tiles[grid.idx(x, y)] = TILE_ROCK;
       }
     }
   }
 
-  // 4. spawn pocket near the centre, with a floor under it
-  const spawn = { x: Math.floor(w / 2), y: Math.floor(h / 2) };
+  // 4. spawn pocket near the centre (sky maps: a shallow basin dug into the surface), with a floor under it
+  const spawn = { x: Math.floor(w / 2), y: skyRow ? skyRow - 4 : Math.floor(h / 2) };
   const r = spawnPocketRadius;
   for (let y = spawn.y - r; y <= spawn.y + r; y++) {
     for (let x = spawn.x - r - 2; x <= spawn.x + r + 2; x++) {
@@ -224,6 +241,122 @@ export function generateTerrain(seed: number, w = MAP_W, h = MAP_H): TerrainResu
   }
 
   return { grid, spawn };
+}
+
+/** carve a disc of air */
+function carveDisc(grid: TileGrid, cx: number, cy: number, r: number): void {
+  for (let y = Math.floor(cy - r); y <= Math.ceil(cy + r); y++) {
+    for (let x = Math.floor(cx - r); x <= Math.ceil(cx + r); x++) {
+      if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) grid.set(x, y, TILE_AIR);
+    }
+  }
+}
+
+/**
+ * Map-specific structure on top of the cellular cave:
+ *  tunnels — worm tunnels radiating from the centre through dense rock (Furnace)
+ *  open    — knock out small rock islands so voids stay wide; leave the big floating chunks (Rift)
+ *  towers  — vertical shafts with rock ledges every few tiles: climb, perch, fall (Glacier)
+ */
+/** a solid slab of rock (floating platform) */
+function slab(grid: TileGrid, x0: number, y0: number, wdt: number, hgt: number): void {
+  for (let y = y0; y < y0 + hgt; y++) for (let x = x0; x < x0 + wdt; x++) grid.set(x, y, TILE_ROCK);
+}
+
+function applyLayout(grid: TileGrid, rng: Rng, layout: TerrainStyle['layout'], border: number, skyRow: number): void {
+  const { w, h } = grid;
+  const cx = Math.floor(w / 2);
+  const cy = Math.floor(h / 2);
+  /** random floating slabs in the sky band, away from the spawn column */
+  const islands = (count: number, minW: number, maxW: number, thick: number, yMin: number, yMax: number) => {
+    for (let k = 0; k < count; k++) {
+      const wdt = minW + rng.int(0, maxW - minW);
+      let x0 = border + 4 + rng.int(0, w - border * 2 - 8 - wdt);
+      if (Math.abs(x0 + wdt / 2 - cx) < 12) x0 += x0 < cx ? -14 : 14;
+      const y0 = yMin + rng.int(0, Math.max(0, yMax - yMin));
+      slab(grid, x0, y0, wdt, thick);
+      // rounded ends
+      grid.set(x0, y0 + thick - 1, TILE_AIR);
+      grid.set(x0 + wdt - 1, y0 + thick - 1, TILE_AIR);
+    }
+  };
+  if (layout === 'islands') {
+    // open sky: floating slabs in the sky band, chunky islands lower down, open caverns in the ground
+    islands(10, 5, 11, 2, Math.floor(skyRow * 0.25), skyRow - 6);
+    islands(6, 8, 16, 3, skyRow - 14, skyRow - 4);
+    removeSmallBlobs(grid, border, 24, skyRow);
+    return;
+  }
+  if (layout === 'tunnels') {
+    const worms = 14;
+    for (let k = 0; k < worms; k++) {
+      let x = cx + (rng.next() - 0.5) * 10;
+      let y = cy + (rng.next() - 0.5) * 6;
+      let ang = (k / worms) * Math.PI * 2 + rng.next() * 0.5;
+      const len = 60 + rng.int(0, 60);
+      const r = 1.6 + rng.next() * 1.2;
+      for (let i = 0; i < len; i++) {
+        carveDisc(grid, x, y, r);
+        ang += (rng.next() - 0.5) * 0.6;
+        x += Math.cos(ang) * 1.2;
+        y += Math.sin(ang) * 1.2;
+        if (x < border + 3 || x > w - border - 4 || y < border + 3 || y > h - border - 4) break;
+      }
+    }
+  } else if (layout === 'open') {
+    removeSmallBlobs(grid, border, 28, 0);
+  } else if (layout === 'towers') {
+    // vertical shafts every ~22 tiles, each with rock ledges you can stand on
+    for (let sx = border + 10; sx < w - border - 10; sx += 18 + rng.int(0, 8)) {
+      const x0 = sx + rng.int(-2, 2);
+      const half = 2 + rng.int(0, 1);
+      const top = border + 2 + rng.int(0, 8);
+      const bottom = h - border - 3 - rng.int(0, 8);
+      for (let y = top; y <= bottom; y++) for (let x = x0 - half; x <= x0 + half; x++) grid.set(x, y, TILE_AIR);
+      // ledges alternate sides so you can zig-zag up
+      let side = rng.next() < 0.5 ? -1 : 1;
+      for (let y = top + 4 + rng.int(0, 3); y < bottom - 3; y += 5 + rng.int(0, 3)) {
+        const len = 2 + rng.int(0, 2);
+        for (let x = 0; x < len; x++) grid.set(x0 + side * (half - x), y, TILE_ROCK);
+        side = -side;
+      }
+    }
+  }
+}
+
+/** remove rock blobs smaller than `minSize` tiles below `fromRow` (voids read as one big cavern with floating chunks) */
+function removeSmallBlobs(grid: TileGrid, border: number, minSize: number, fromRow: number): void {
+  const { w, h } = grid;
+  const seen = new Uint8Array(w * h);
+  const stack: number[] = [];
+  for (let i = fromRow * w; i < w * h; i++) {
+    if (seen[i] || grid.tiles[i] === TILE_AIR) continue;
+    const blob: number[] = [];
+    stack.push(i);
+    seen[i] = 1;
+    let touchesBorder = false;
+    while (stack.length) {
+      const j = stack.pop()!;
+      blob.push(j);
+      const x = j % w;
+      const y = Math.floor(j / w);
+      if (x <= border || y <= border || x >= w - 1 - border || y >= h - 1 - border) touchesBorder = true;
+      for (const [nx, ny] of [
+        [x + 1, y],
+        [x - 1, y],
+        [x, y + 1],
+        [x, y - 1],
+      ] as [number, number][]) {
+        if (!grid.inBounds(nx, ny)) continue;
+        const n = ny * w + nx;
+        if (!seen[n] && grid.tiles[n] !== TILE_AIR) {
+          seen[n] = 1;
+          stack.push(n);
+        }
+      }
+    }
+    if (!touchesBorder && blob.length < minSize) for (const j of blob) grid.tiles[j] = TILE_AIR;
+  }
 }
 
 /**

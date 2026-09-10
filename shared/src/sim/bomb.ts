@@ -10,6 +10,7 @@ import type { BombSnap } from './events.js';
  */
 export class SimBomb {
   readonly body: RAPIER.RigidBody;
+  readonly collider: RAPIER.Collider;
   readonly def: BombDef;
   fuse: number;
   age = 0;
@@ -34,14 +35,31 @@ export class SimBomb {
     this.body = world.createRigidBody(
       R.RigidBodyDesc.dynamic().setTranslation(x, y).setLinvel(vx, vy).setLinearDamping(GEL_BOMB.linearDamping).setCcdEnabled(true),
     );
-    world.createCollider(
-      R.ColliderDesc.ball(GEL_BOMB.radius)
-        .setRestitution(type === 'gel' ? GEL_BOMB.restitution : 0.15)
-        .setFriction(type === 'gel' ? GEL_BOMB.friction : 1.5)
+    const bouncy = type === 'gel' || type === 'cluster' || type === 'bomblet';
+    this.collider = world.createCollider(
+      R.ColliderDesc.ball(type === 'bomblet' ? GEL_BOMB.radius * 0.6 : GEL_BOMB.radius)
+        .setRestitution(bouncy ? GEL_BOMB.restitution : 0.15)
+        .setFriction(bouncy ? GEL_BOMB.friction : 1.5)
         .setDensity(2)
         .setCollisionGroups(COL_BOMB),
       this.body,
     );
+  }
+
+  /** impact bombs: touching rock or an alien (after a short arming window so it clears the thrower) */
+  touching(): boolean {
+    if (!this.def.impact || this.age < 0.12) return false;
+    let hit = false;
+    this.world.contactPairsWith(this.collider, () => {
+      hit = true;
+    });
+    if (hit) return true;
+    // contact pairs can lag a frame on fast bodies: also probe just ahead along the velocity
+    const v = this.body.linvel();
+    const sp = Math.hypot(v.x, v.y);
+    if (sp < 0.5) return false;
+    const p = this.body.translation();
+    return this.world.castRay(new this.R.Ray(p, { x: v.x / sp, y: v.y / sp }), GEL_BOMB.radius + 0.1, true, undefined, RAY_TILE) !== null;
   }
 
   /** @returns 'explode' when a timed fuse ends or life expires */
@@ -53,13 +71,15 @@ export class SimBomb {
     }
     if (this.age > this.def.lifeSec) return 'explode';
     if (this.def.proximity > 0 && !this.landed) {
+      // sticks the moment it touches rock (it would otherwise roll along flat floors forever)
       const v = this.body.linvel();
       const p = this.body.translation();
       const onGround = this.world.castRay(new this.R.Ray(p, { x: 0, y: 1 }), GEL_BOMB.radius + 0.15, true, undefined, RAY_TILE) !== null;
-      if (Math.hypot(v.x, v.y) < 0.6 && onGround) this.stillFor += dt;
+      if (onGround && v.y > -1 && this.age > 0.1) this.stillFor += dt;
       else this.stillFor = 0;
-      if (this.stillFor > 0.15) {
+      if (this.stillFor > 0.05) {
         this.landed = true;
+        this.body.setLinvel({ x: 0, y: 0 }, true);
         this.body.setBodyType(this.R.RigidBodyType.Fixed, true);
       }
     }

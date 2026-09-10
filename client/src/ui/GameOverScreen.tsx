@@ -15,6 +15,7 @@ export function GameOverScreen({ onRetry, onMenu }: Props) {
     <div className="screen gameover" data-ui="gameover">
       <div className="panel">
         <h2 className="title small danger">SIGNAL LOST</h2>
+        <p className="tagline">THE CAVE TOOK YOU</p>
         <div className="stats">
           <div>
             <span className="label">WAVE</span>
