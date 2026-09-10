@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">LAST-VECTOR</string>
+    <string name="title_activity_main">LAST-VECTOR</string>
+    <string name="package_name">in.synctric.lastvector</string>
+    <string name="custom_url_scheme">in.synctric.lastvector</string>
+</resources>

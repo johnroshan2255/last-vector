@@ -1,5 +1,6 @@
 import { useEffect, useState, type RefObject } from 'react';
 import type { Platform } from '@shared/types';
+import { Capacitor } from '@capacitor/core';
 
 export interface Viewport {
   width: number;
@@ -13,8 +14,11 @@ export interface Viewport {
 function read(): Viewport {
   const width = window.innerWidth;
   const height = window.innerHeight;
-  const isTouch =
-    'ontouchstart' in window || navigator.maxTouchPoints > 0 || matchMedia('(pointer: coarse)').matches;
+  // Native app: always touch. Web: only when the primary pointer is a finger, so a
+  // touchscreen laptop driven by mouse + keyboard keeps the desktop controls.
+  const coarse = matchMedia('(pointer: coarse)').matches;
+  const canHover = matchMedia('(hover: hover)').matches;
+  const isTouch = Capacitor.isNativePlatform() || coarse || (navigator.maxTouchPoints > 0 && !canHover);
   return {
     width,
     height,

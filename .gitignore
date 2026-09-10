@@ -26,3 +26,14 @@ Thumbs.db
 
 # CrazyGames submission zips
 *.zip
+
+# Capacitor / mobile
+client/android/keystore.properties
+*.jks
+*.keystore
+client/android/app/src/main/assets/public/
+client/android/app/src/main/assets/capacitor.config.json
+client/android/app/src/main/assets/capacitor.plugins.json
+client/ios/App/App/public/
+client/ios/App/App/capacitor.config.json
+client/ios/App/CapApp-SPM/.build/

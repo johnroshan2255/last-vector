@@ -1,0 +1,5 @@
+node_modules
+dist
+client/android
+client/ios
+client/assets

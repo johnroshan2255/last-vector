@@ -5,10 +5,12 @@ import { MAX_NAME_LENGTH } from '@shared/constants';
 import { BOMBS, BOMB_ORDER, START_KIT, WEAPONS, WEAPON_ORDER } from '@shared/weapons';
 import { bombIconUrl, weaponIconUrl } from '../game/sprites';
 import { mapsWithBomb, mapsWithWeapon } from '@shared/maps';
+import { ServerSettings } from './ServerSettings';
 
-export type SettingsTab = 'general' | 'weapons' | 'bombs' | 'controls';
+export type SettingsTab = 'general' | 'server' | 'weapons' | 'bombs' | 'controls';
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'GENERAL' },
+  { id: 'server', label: 'SERVER' },
   { id: 'weapons', label: 'WEAPONS' },
   { id: 'bombs', label: 'BOMBS' },
   { id: 'controls', label: 'CONTROLS' },
@@ -85,6 +87,8 @@ export function SettingsBody({ initialTab = 'general', isTouch = false }: { init
           <p className="hint">Callsign is what other pilots see in the lobby and kill feed.</p>
         </div>
       )}
+
+      {tab === 'server' && <ServerSettings />}
 
       {tab === 'weapons' && (
         <div className="tab-body" data-tab-body="weapons">

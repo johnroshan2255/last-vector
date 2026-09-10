@@ -14,6 +14,7 @@ import { PauseOverlay } from './ui/PauseOverlay';
 import { MobileControls, type TouchState } from './ui/MobileControls';
 import { DebugOverlay } from './ui/DebugOverlay';
 import { requestFullscreen, toggleFullscreen } from './platform/fullscreen';
+import { initNative } from './platform/native';
 
 /**
  * Top-level layout: PixiJS canvas underneath, React UI layers on top.
@@ -37,7 +38,31 @@ export default function App() {
       console.error(e);
       setError(String(e));
     });
+    // Capacitor only: immersive bars + Android back = pause / close, never quit mid-match
+    const offNative = initNative({
+      onBack: () => {
+        const s = useGameStore.getState();
+        if (s.settingsOpen) {
+          s.setSettingsOpen(false);
+          return true;
+        }
+        if (s.phase === 'playing') {
+          game.pause();
+          return true;
+        }
+        if (s.phase === 'paused') {
+          game.resume();
+          return true;
+        }
+        if (s.phase === 'lobby' || s.phase === 'gameover') {
+          game.toMenu();
+          return true;
+        }
+        return false;
+      },
+    });
     return () => {
+      offNative();
       game.destroy();
       gameRef.current = null;
     };

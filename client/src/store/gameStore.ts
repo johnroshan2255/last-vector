@@ -53,6 +53,13 @@ export interface Settings {
   name: string;
 }
 
+/** custom LAN / self-hosted game server (Settings → SERVER); null = default production server */
+export interface ServerPref {
+  host: string;
+  port: number;
+  secure: boolean;
+}
+
 export interface Best {
   wave: number;
   score: number;
@@ -111,6 +118,10 @@ interface GameStore {
   lastRun: { wave: number; kills: number; shards: number; score: number } | null;
   net: OnlineState;
   setNet: (n: Partial<OnlineState>) => void;
+  server: ServerPref | null;
+  /** true once the saved server address has been read from @capacitor/preferences */
+  serverReady: boolean;
+  setServer: (server: ServerPref | null) => void;
   /** settings modal (menu / lobby / pause) */
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
@@ -190,6 +201,9 @@ export const useGameStore = create<GameStore>((set) => ({
   lastRun: null,
   net: { ...offlineNet },
   setNet: (n) => set((s) => ({ net: { ...s.net, ...n } })),
+  server: null,
+  serverReady: false,
+  setServer: (server) => set({ server, serverReady: true }),
   settingsOpen: false,
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   debug: {

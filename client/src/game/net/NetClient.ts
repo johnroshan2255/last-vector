@@ -8,6 +8,7 @@ import type { TileGrid } from '@shared/sim/terrain';
 import { bombStartCounts, type BombType, type WeaponId } from '@shared/weapons';
 import { DEFAULT_MAP, MAPS, isMapId, type MapId } from '@shared/maps';
 import type { MatchSource } from '../sources';
+import { resolveServerUrl } from '../../platform/server';
 
 /** loosely-typed view of the server schema (we read, never write) */
 interface AnyMap<T> {
@@ -35,13 +36,9 @@ interface ServerState {
   drops: AnyMap<ServerDrop>; clouds: AnyMap<ServerCloud>;
 }
 
+/** ?server= → saved LAN address (Settings → SERVER) → VITE_SERVER_URL → production / page host. See platform/server.ts. */
 export function serverUrl(): string {
-  const q = new URLSearchParams(location.search).get('server');
-  if (q) return q;
-  const env = (import.meta.env.VITE_SERVER_URL as string | undefined) ?? '';
-  if (env) return env;
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${proto}://${location.hostname}:2567`;
+  return resolveServerUrl();
 }
 
 /** the game server's HTTP side (room-code lookup) derived from its ws URL */

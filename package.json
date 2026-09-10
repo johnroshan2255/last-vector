@@ -2,7 +2,7 @@
   "name": "last-vector",
   "version": "0.1.0",
   "private": true,
-  "description": "LAST-VECTOR \u2014 multiplayer alien-strike arena shooter. React + PixiJS + Rapier client, Node + Colyseus server.",
+  "description": "LAST-VECTOR — multiplayer alien-strike arena shooter. React + PixiJS + Rapier client, Node + Colyseus server.",
   "workspaces": [
     "client",
     "server",
@@ -26,7 +26,13 @@
     "check": "node tools/check/visual-check.mjs",
     "probe": "node tools/check/probe.mjs",
     "probe:stress": "node tools/check/probe-stress.mjs",
-    "probe:resize": "node tools/check/probe-resize.mjs"
+    "probe:resize": "node tools/check/probe-resize.mjs",
+    "mobile:sync": "npm run build -w client && npm run cap:sync -w client",
+    "mobile:android": "npm run cap:android -w client",
+    "mobile:ios": "npm run cap:ios -w client",
+    "mobile:assets": "npm run cap:assets -w client",
+    "mobile:apk": "npm run mobile:sync && npm run android:debug -w client",
+    "mobile:apk:release": "npm run mobile:sync && npm run android:release -w client"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

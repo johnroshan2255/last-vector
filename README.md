@@ -52,3 +52,14 @@ npm run format
 
 - **Client → CrazyGames:** `npm run build:client` produces `client/dist/`; zip and upload via the CrazyGames developer portal.
 - **Server → Render / Fly.io / VPS:** long-running Node process (`npm run start:server`). Colyseus needs persistent WebSocket connections, so no serverless.
+
+## Mobile (Android / iOS)
+
+The client also ships as native apps via Capacitor — see [docs/MOBILE.md](docs/MOBILE.md) for prerequisites,
+the `npm run mobile:*` scripts, LAN-server networking rules and store signing.
+
+```bash
+nvm use && npm run mobile:sync   # build web + sync into client/android and client/ios
+npm run mobile:android           # open in Android Studio
+npm run mobile:ios               # open in Xcode
+```

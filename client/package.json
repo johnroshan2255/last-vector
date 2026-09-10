@@ -8,9 +8,25 @@
     "dev": "vite --host",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "preview": "vite preview --host",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cap:sync": "cap sync",
+    "cap:android": "cap open android",
+    "cap:ios": "cap open ios",
+    "cap:run:android": "cap run android",
+    "cap:run:ios": "cap run ios",
+    "cap:assets": "capacitor-assets generate --android --ios --iconBackgroundColor '#05060a' --iconBackgroundColorDark '#05060a' --splashBackgroundColor '#05060a' --splashBackgroundColorDark '#05060a'",
+    "android:debug": "cd android && ./gradlew assembleDebug",
+    "android:release": "cd android && ./gradlew assembleRelease",
+    "android:bundle": "cd android && ./gradlew bundleRelease"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/core": "^8.5.1",
+    "@capacitor/ios": "^8.5.1",
+    "@capacitor/preferences": "^8.0.1",
+    "@capacitor/splash-screen": "^8.0.2",
+    "@capacitor/status-bar": "^8.0.3",
     "@dimforge/rapier2d-compat": "^0.20.0",
     "@last-vector/shared": "*",
     "colyseus.js": "^0.16.22",
@@ -21,6 +37,8 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.5.1",
     "@types/howler": "^2.2.13",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",

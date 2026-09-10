@@ -4,6 +4,8 @@
  *  - iPhone Safari: no page fullscreen at all. The only way to hide the browser
  *    chrome is to launch from the home screen (PWA, see manifest.webmanifest).
  */
+import { Capacitor } from '@capacitor/core';
+
 type FsDoc = Document & {
   webkitFullscreenElement?: Element | null;
   webkitExitFullscreen?: () => Promise<void> | void;
@@ -22,6 +24,7 @@ export function isIPhone(): boolean {
 
 /** launched from the home screen (PWA) — browser chrome already hidden */
 export function isStandalone(): boolean {
+  if (Capacitor.isNativePlatform()) return true; // Capacitor app: no browser chrome, bars hidden natively
   return (
     (navigator as Navigator & { standalone?: boolean }).standalone === true ||
     matchMedia('(display-mode: standalone)').matches ||
@@ -30,6 +33,7 @@ export function isStandalone(): boolean {
 }
 
 export function supportsFullscreen(): boolean {
+  if (Capacitor.isNativePlatform()) return false;
   const d = document as FsDoc;
   const el = document.documentElement as FsEl;
   return !!(document.fullscreenEnabled || d.webkitFullscreenEnabled) && !!(el.requestFullscreen || el.webkitRequestFullscreen);
