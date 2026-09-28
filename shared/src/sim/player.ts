@@ -4,6 +4,7 @@ import type { WeaponId } from '../weapons.js';
 import type { PlayerInput } from '../types.js';
 import { COL_PLAYER, RAY_TILE } from './groups.js';
 import { SimWeapons } from './weapons.js';
+import { muzzlePoint, shoulderPoint } from '../gunArt.js';
 import { BOMBS, BOMB_ORDER, bombStartCounts, type BombType } from '../weapons.js';
 import type { PlayerSnap } from './events.js';
 
@@ -79,8 +80,11 @@ export class SimPlayer {
    *   uses the weapon's own knockback instead of the alien shove.
    * @returns true if this hit killed the player
    */
+  /** tests only: takes no damage (sections that check what bombs *do*, not what they cost) */
+  god = false;
+
   takeDamage(amount: number, fromX: number, fromY: number, weapon = false, knockback: number = PLAYER_COMBAT.knockback): boolean {
-    if (this.dead || amount <= 0 || this.shield > 0) return false;
+    if (this.dead || amount <= 0 || this.shield > 0 || this.god) return false;
     if (!weapon && this.invuln > 0) return false;
     this.health = Math.max(0, this.health - amount);
     // contact hits grant a protection window; weapon hits only flicker
@@ -160,7 +164,19 @@ export class SimPlayer {
     this.body.setLinvel({ x: v.x - Math.cos(angle) * amount, y: v.y - Math.sin(angle) * amount * 0.6 }, true);
   }
 
-  /** muzzle position in units */
+  /** where the held gun's barrel ends (units): rounds leave from here */
+  gunMuzzle(id: WeaponId): { x: number; y: number } {
+    const p = this.body.translation();
+    return muzzlePoint(p.x, p.y, this.aimAngle, id);
+  }
+
+  /** the shoulder the gun pivots on (units) */
+  shoulder(): { x: number; y: number } {
+    const p = this.body.translation();
+    return shoulderPoint(p.x, p.y);
+  }
+
+  /** a point `offset` units out along the aim from the body centre (bomb throws) */
   muzzle(offset: number): { x: number; y: number } {
     const p = this.body.translation();
     return { x: p.x + Math.cos(this.aimAngle) * offset, y: p.y + Math.sin(this.aimAngle) * offset };

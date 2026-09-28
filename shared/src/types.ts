@@ -55,7 +55,7 @@ export interface JoinOptions {
 /** Server → client message names. */
 export enum ServerMessage {
   Welcome = 'welcome',
-  /** destroyed tile indices since the last patch */
+  /** tile changes since the last patch: `TilesMessage` */
   Tiles = 'tiles',
   /** transient SimEvents (shots, explosions, deaths...) */
   Events = 'events',
@@ -68,12 +68,24 @@ export interface WelcomeMessage {
   id: string;
   seed: number;
   biome: string;
-  destroyed: number[];
+  /** every tile that differs from the generated cave, as flat [index, opCode] pairs */
+  tiles: number[];
   tick: number;
   /** room code other players type to join */
   code: string;
   maxPlayers: number;
   map: string;
+}
+
+/** ServerMessage.Tiles payload */
+export interface TilesMessage {
+  /** ordered tile ops (flat [index, opCode] pairs): the state change, replayed in order */
+  o: number[];
+  /** FX only: tiles destroyed by carving, the material each was, hard stone chipped, tiles regrown */
+  d: number[];
+  m: number[];
+  c: number[];
+  r: number[];
 }
 
 /** `GET /rooms/:code` on the game server */

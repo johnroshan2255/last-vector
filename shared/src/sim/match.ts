@@ -1,10 +1,10 @@
 import type RAPIER from '@dimforge/rapier2d-compat';
 import { ALIENS, BURN, DROPS, PICKUPS, PLAYER, PVP, REGROW, WAVES, type AlienKind, type BiomeId } from '../constants.js';
 import type { PlayerInput } from '../types.js';
-import { BOMBS, BOMB_ORDER, WEAPONS, dropPool, type BombType, type WeaponDef, type WeaponId } from '../weapons.js';
+import { BOMBS, BOMB_ORDER, WEAPONS, DROP_WEAPONS, type BombType, type WeaponDef, type WeaponId } from '../weapons.js';
 import { DEFAULT_MAP, MAPS, type MapDef, type MapId } from '../maps.js';
 import { Rng } from './rng.js';
-import { generateTerrain, TileGrid } from './terrain.js';
+import { generateTerrain, HARD_HP, TileGrid } from './terrain.js';
 import { createWorld, TileColliders } from './world.js';
 import { SimPlayer } from './player.js';
 import { SimAlien } from './alien.js';
@@ -61,8 +61,6 @@ export class Match implements WeaponHost {
   readonly biome: BiomeId;
   readonly map: MapDef;
   readonly seed: number;
-  /** tiles currently carved out (late joiners replay this); regrowth removes entries */
-  private destroyedSet = new Set<number>();
   private regrowQueue: { i: number; at: number }[] = [];
   private dropTimer: number = DROPS.firstSec;
   /** alternate weapon / bomb crates */
@@ -122,9 +120,9 @@ export class Match implements WeaponHost {
       : this;
   }
 
-  /** currently carved tiles (for Welcome / tests) */
-  get destroyedLog(): number[] {
-    return [...this.destroyedSet];
+  /** every tile that differs from the generated cave, as ops (for Welcome / tests) */
+  get tileDiff(): number[] {
+    return this.grid.diff();
   }
 
   // ------------------------------------------------------------------ players
@@ -190,48 +188,32 @@ export class Match implements WeaponHost {
   }
 
   // ------------------------------------------------------------------ WeaponHost
-  carve(x: number, y: number, radius: number): number {
-    const { changed, destroyed, ore } = this.grid.destroyRadius(x, y, radius);
-    if (!destroyed.length) return 0;
+  /**
+   * Hit the rock in a disc. `power` is how many hit points hard stone loses; by default
+   * bullets chip it (2), explosions crack it (6), big blasts shatter it outright.
+   */
+  carve(x: number, y: number, radius: number, power = radius >= 4 ? HARD_HP : radius >= 2 ? 6 : 2, hitTile?: { x: number; y: number }): number {
+    const { changed, destroyed, ore, mats, chipped } = this.grid.destroyRadius(x, y, radius, power, hitTile);
+    if (!destroyed.length && !chipped.length) return 0;
     this.tiles.refresh(changed);
     this.destroyedTotal += destroyed.length;
-    for (const i of destroyed) {
-      this.destroyedSet.add(i);
-      this.regrowQueue.push({ i, at: this.time + REGROW.delaySec + this.rng.next() * REGROW.jitterSec });
-    }
+    for (const i of destroyed) this.regrowQueue.push({ i, at: this.time + REGROW.delaySec + this.rng.next() * REGROW.jitterSec });
     for (const i of ore) {
       const ox = (i % this.grid.w) + 0.5;
       const oy = Math.floor(i / this.grid.w) + 0.5;
       for (let k = 0; k < PICKUPS.shardsPerOre; k++) this.pickups.spawn('shard', ox, oy, 5 + this.rng.next() * 3, () => this.rng.next());
     }
-    this.events.push({ t: 'carve', destroyed, ore, changed });
+    this.events.push({ t: 'carve', destroyed, ore, changed, mats, chipped });
     return destroyed.length;
   }
 
-  /** apply a destroyed-tile list received from an authority (client in MP) */
-  applyDestroyed(indices: number[]): number[] {
-    const changed = new Set<number>();
-    for (const i of indices) {
-      for (const c of this.grid.destroy(i % this.grid.w, Math.floor(i / this.grid.w))) changed.add(c);
-      this.destroyedSet.add(i);
-    }
-    this.destroyedTotal += indices.length;
-    const arr = [...changed];
-    this.tiles.refresh(arr);
-    return arr;
+  /** apply tile ops received from an authority (client in MP); returns the tiles to re-render */
+  applyTileOps(ops: number[]): number[] {
+    const changed = [...new Set(this.grid.applyOps(ops))];
+    this.tiles.refresh(changed);
+    return changed;
   }
 
-  /** apply a restored-tile list received from an authority (client in MP) */
-  applyRestored(indices: number[]): number[] {
-    const changed = new Set<number>();
-    for (const i of indices) {
-      for (const c of this.grid.restore(i % this.grid.w, Math.floor(i / this.grid.w))) changed.add(c);
-      this.destroyedSet.delete(i);
-    }
-    const arr = [...changed];
-    this.tiles.refresh(arr);
-    return arr;
-  }
 
   /** regrow due tiles unless a body is standing in them */
   private regrow(): void {
@@ -262,10 +244,10 @@ export class Match implements WeaponHost {
         continue;
       }
       if (this.grid.tiles[q.i] === 0) {
-        for (const c of this.grid.restore(x, y)) changed.add(c);
-        restored.push(q.i);
+        const ch = this.grid.restore(x, y);
+        for (const c of ch) changed.add(c);
+        if (ch.length) restored.push(q.i);
       }
-      this.destroyedSet.delete(q.i);
       this.regrowQueue.splice(k, 1);
     }
     if (restored.length) {
@@ -284,7 +266,7 @@ export class Match implements WeaponHost {
   igniteTile(x: number, y: number): void {
     const tx = Math.floor(x);
     const ty = Math.floor(y);
-    if (!this.grid.inBounds(tx, ty) || !this.grid.isSolid(tx, ty)) return;
+    if (!this.grid.burns(tx, ty)) return; // stone and sand don't burn
     const i = this.grid.idx(tx, ty);
     if (this.burning.has(i) || this.burning.size >= BURN.maxTiles) return;
     this.burning.set(i, BURN.tileSec);
@@ -355,16 +337,32 @@ export class Match implements WeaponHost {
     const by = this.lastShooter;
     for (const pl of this.players.values()) {
       const pp = pl.position;
-      const pd = Math.hypot(pp.x - x, pp.y - y);
+      // distance to the pilot's body, not its centre: a blast at your feet is point-blank
+      const pd = Math.max(0, Math.hypot(pp.x - x, pp.y - y) - PLAYER.radius);
       if (pd > radius) continue;
+      const f = 1 - (pd / radius) * 0.7;
       const scale = pl.id === by ? PVP.selfExplosionScale : PVP.explosionScale;
-      this.hurtPlayer(pl, Math.round(damage * scale * (1 - pd / radius)), x, y, by);
+      // counts as a weapon hit (the contact-hit grace window doesn't shield you) and throws you back
+      this.hurtPlayer(pl, Math.round(damage * scale * f), x, y, by, true, 12 * f);
     }
     this.events.push({ t: 'explosion', x, y, r: radius, color });
   }
 
   // ------------------------------------------------------------------ aliens
   private lastShooter: string | null = null;
+  /** shuffle bag of weapon-crate contents: every weapon drops once before any repeats, on every wave */
+  private dropBag: WeaponId[] = [];
+
+  private nextDropWeapon(): WeaponId {
+    if (!this.dropBag.length) {
+      this.dropBag = [...DROP_WEAPONS];
+      for (let i = this.dropBag.length - 1; i > 0; i--) {
+        const j = this.rng.int(0, i);
+        [this.dropBag[i], this.dropBag[j]] = [this.dropBag[j], this.dropBag[i]];
+      }
+    }
+    return this.dropBag.pop()!;
+  }
 
   spawnAlien(kind: AlienKind, x: number, y: number, frozen = false): SimAlien {
     const a = new SimAlien(this.R, this.world, `a${this.nextId++}`, kind, x, y, this.rng.next() * 10);
@@ -541,6 +539,7 @@ export class Match implements WeaponHost {
   // ------------------------------------------------------------------ step
   /** Advance one fixed step. Returns (and clears) the events it produced. */
   step(dt: number): SimEvent[] {
+    this.grid.ops = []; // ops are per step: the server forwards them right after step()
     this.tick++;
     this.time += dt;
     const alive = [...this.players.values()].filter((p) => !p.dead);
@@ -652,8 +651,7 @@ export class Match implements WeaponHost {
           if (this.spawnBombDrop(bomb, anchor.x + ox, anchor.y)) break;
         }
       } else {
-        const pool = dropPool(this.map.weapons, this.waves.wave);
-        const weapon = pool[this.rng.int(0, pool.length - 1)];
+        const weapon = this.nextDropWeapon();
         for (let attempt = 0; weapon && attempt < 6; attempt++) {
           const ox = attempt === 0 ? 0 : this.rng.int(-6, 6);
           if (this.spawnDrop(weapon, anchor.x + ox, anchor.y)) break;

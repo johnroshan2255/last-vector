@@ -3,7 +3,8 @@ import type { BombType, WeaponId } from '../weapons.js';
 
 /** Transient things that happened during a sim step. Rendering/audio consume these. */
 export type SimEvent =
-  | { t: 'carve'; destroyed: number[]; ore: number[]; changed: number[] }
+  /** `mats`: what each destroyed tile was (TILE_*); `chipped`: hard stone that was hit but held */
+  | { t: 'carve'; destroyed: number[]; ore: number[]; changed: number[]; mats: number[]; chipped: number[] }
   | { t: 'shot'; id: string; weapon: WeaponId; x: number; y: number; angle: number }
   | { t: 'hit'; weapon: WeaponId; x: number; y: number; angle: number; alien: boolean }
   | { t: 'beamDig'; id: string; weapon: WeaponId; x: number; y: number; angle: number }

@@ -1266,54 +1266,63 @@ body,
 }
 
 /* ---- pickup (TAKE) button + EMP jam ---- */
+/* Mini Militia style: a small translucent round button above the aim stick showing what's on the ground */
 .hud-take {
   position: absolute;
-  top: calc(var(--safe-top) + 1.2vh + 3.2em);
-  left: 50%;
-  transform: translateX(-50%);
-  display: inline-flex;
-  align-items: center;
-  gap: 0.6em;
-  font-family: var(--font);
-  font-size: var(--fs-sm);
-  color: #05060a;
-  background: #ffb84f;
-  border: 2px solid #fff;
-  padding: 0.5em 1em;
+  left: calc(100% - var(--safe-right) - 16vw);
+  top: calc(100% - var(--safe-bottom) - 14vh - 52px - 96px);
+  transform: translate(-50%, -50%);
+  display: grid;
+  place-items: center;
+  width: clamp(48px, 10vh, 64px);
+  height: clamp(48px, 10vh, 64px);
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(13, 18, 32, 0.55);
+  border: 2px solid color-mix(in srgb, var(--c, #4fe3ff) 70%, transparent);
   cursor: pointer;
   pointer-events: auto;
-  text-shadow: none;
-  box-shadow: 0 0 18px rgba(255, 184, 79, 0.55);
-  animation: takepulse 0.9s ease-in-out infinite alternate;
-  min-height: 44px;
+  /* above the mobile aim-stick touch zone, which covers this corner */
+  z-index: 5;
+  animation: takepulse 0.8s ease-in-out infinite alternate;
 }
 @keyframes takepulse {
   to {
-    box-shadow: 0 0 28px rgba(255, 184, 79, 0.9);
+    border-color: var(--c, #4fe3ff);
   }
 }
+.hud-take:active {
+  background: rgba(79, 227, 255, 0.3);
+}
 .hud-take-icon {
-  height: 1.6em;
-  width: auto;
+  width: 78%;
+  height: auto;
+  max-height: 60%;
+  object-fit: contain;
   image-rendering: pixelated;
   pointer-events: none;
 }
 .hud-take-icon.bomb {
-  height: 1.2em;
+  width: 44%;
+  max-height: 50%;
 }
-.hud-take-arrow {
-  font-size: var(--fs-md);
-  line-height: 1;
-}
-.hud-take-label {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  line-height: 1.3;
-}
-.hud-take-label small {
+/* the keyboard hint only where there is a keyboard */
+.hud-take-key {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
   font-size: calc(var(--fs-xs) * 0.8);
-  color: #3a2a10;
+  line-height: 1;
+  color: #e6e8f0;
+  background: rgba(13, 18, 32, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  padding: 2px 4px;
+  pointer-events: none;
+}
+@media (hover: none) and (pointer: coarse) {
+  .hud-take-key {
+    display: none;
+  }
 }
 .hud-jammed {
   position: absolute;

@@ -86,30 +86,19 @@ export function HUD({ onSettings, onSelectBomb, onTake }: Props) {
         {critical && <span className="hud-critical">CRITICAL</span>}
       </div>
 
-      {/* Mini-Militia pickup: current → new, tap to take */}
-      {hud.nearDrop && (
-        <button className="hud-take" data-action="take" onPointerDown={(e) => e.stopPropagation()} onClick={onTake}>
-          {hud.nearDrop.weapon ? (
-            <>
-              <img className="hud-take-icon" src={weaponIconUrl(hud.weapon)} alt="" draggable={false} />
-              <span className="hud-take-arrow">➜</span>
-              <img className="hud-take-icon" src={weaponIconUrl(hud.nearDrop.weapon)} alt="" draggable={false} />
-              <span className="hud-take-label">
-                TAKE {WEAPONS[hud.nearDrop.weapon].name}
-                <small>replaces {def.name} · G</small>
-              </span>
-            </>
-          ) : hud.nearDrop.bomb ? (
-            <>
-              <img className="hud-take-icon bomb" src={bombIconUrl(hud.bombType)} alt="" draggable={false} />
-              <span className="hud-take-arrow">➜</span>
-              <img className="hud-take-icon bomb" src={bombIconUrl(hud.nearDrop.bomb)} alt="" draggable={false} />
-              <span className="hud-take-label">
-                TAKE +2 {BOMBS[hud.nearDrop.bomb].name}
-                <small>becomes your bomb · G</small>
-              </span>
-            </>
-          ) : null}
+      {/* Mini-Militia pickup: a small round button with what's on the ground, just above the aim stick */}
+      {hud.nearDrop && (hud.nearDrop.weapon || hud.nearDrop.bomb) && (
+        <button
+          className="hud-take"
+          data-action="take"
+          aria-label={hud.nearDrop.weapon ? `Take ${WEAPONS[hud.nearDrop.weapon].name} (replaces ${def.name})` : `Take +2 ${BOMBS[hud.nearDrop.bomb!].name}`}
+          title={hud.nearDrop.weapon ? `${WEAPONS[hud.nearDrop.weapon].name} · G` : `+2 ${BOMBS[hud.nearDrop.bomb!].name} · G`}
+          style={{ '--c': `#${(hud.nearDrop.weapon ? WEAPONS[hud.nearDrop.weapon].color : BOMBS[hud.nearDrop.bomb!].color).toString(16).padStart(6, '0')}` } as React.CSSProperties}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={onTake}
+        >
+          <img className={`hud-take-icon${hud.nearDrop.weapon ? '' : ' bomb'}`} src={hud.nearDrop.weapon ? weaponIconUrl(hud.nearDrop.weapon) : bombIconUrl(hud.nearDrop.bomb!)} alt="" draggable={false} />
+          <span className="hud-take-key">G</span>
         </button>
       )}
       {hud.jammed > 0 && (

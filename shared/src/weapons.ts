@@ -33,8 +33,6 @@ export interface WeaponDef {
   /** arc: extra targets to chain to and the chain hop range */
   chain?: number;
   chainRange?: number;
-  /** earliest wave this weapon can appear in a supply drop (1 = start kit / from the first drop) */
-  unlockWave: number;
   /** flame: damage-over-time applied to aliens */
   burn?: { dps: number; sec: number };
   /** rail: passes through every alien on the line */
@@ -64,7 +62,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     recoil: 0.6,
     color: 0x4fe3ff,
     coreColor: 0xffffff,
-    unlockWave: 1,
     zoom: 2,
     blurb: 'Reliable sidearm. Infinite, accurate, cool-running.',
   },
@@ -84,7 +81,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     recoil: 0,
     color: 0x4fe3ff,
     coreColor: 0xffffff,
-    unlockWave: 1,
     zoom: 2,
     blurb: 'Continuous mining beam. Carves rock fast, overheats.',
   },
@@ -104,7 +100,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     recoil: 5,
     color: 0xffb84f,
     coreColor: 0xfff2c0,
-    unlockWave: 2,
     zoom: 2,
     blurb: 'Seven-pellet shotgun. Brutal up close, blows out walls.',
   },
@@ -124,7 +119,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     recoil: 0.9,
     color: 0xfff27a,
     coreColor: 0xffffff,
-    unlockWave: 3,
     zoom: 3,
     blurb: 'Minigun. Hose of tracers, shreds swarms, runs hot.',
   },
@@ -146,7 +140,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     coreColor: 0xffffff,
     chain: 3,
     chainRange: 5,
-    unlockWave: 4,
     zoom: 3,
     blurb: 'Lightning gun. Seeks the nearest alien and chains between them.',
   },
@@ -164,10 +157,9 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     heat: 18,
     knockback: 10,
     recoil: 3,
-    color: 0xff4fd8,
+    color: 0xff9a3c,
     coreColor: 0xffffff,
     blastRadius: 2.8,
-    unlockWave: 5,
     zoom: 4,
     blurb: 'Rockets. Big craters, big knockback, slow reload.',
   },
@@ -188,7 +180,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     color: 0xff8a3d,
     coreColor: 0xfff0a0,
     burn: { dps: 9, sec: 3 },
-    unlockWave: 2,
     zoom: 2,
     blurb: 'Short-range fire cone. Sets aliens burning, does not dig.',
   },
@@ -209,7 +200,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     color: 0x9dffb0,
     coreColor: 0xffffff,
     pierce: true,
-    unlockWave: 4,
     zoom: 5,
     blurb: 'Instant piercing slug. Goes through every alien on the line.',
   },
@@ -229,7 +219,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     recoil: 4,
     color: 0xc8ffd8,
     coreColor: 0xffffff,
-    unlockWave: 2,
     zoom: 7,
     blurb: 'Long-range single shot. One round, one kill on most things.',
   },
@@ -251,7 +240,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     coreColor: 0xf0e8ff,
     blastRadius: 2.6,
     jamSec: 10,
-    unlockWave: 3,
     zoom: 3,
     blurb: 'Slow crackling orb. Anyone caught in the burst loses their jetpack for 10 s.',
   },
@@ -272,7 +260,6 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     color: 0x7dff5a,
     coreColor: 0xffffff,
     blastRadius: 1.4,
-    unlockWave: 3,
     zoom: 3,
     blurb: 'Rapid plasma bursts with small blasts.',
   },
@@ -282,16 +269,8 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
 export const WEAPON_ORDER: WeaponId[] = ['blaster', 'vector', 'scatter', 'vulcan', 'plasma', 'flamer', 'sniper', 'arc', 'rail', 'launcher', 'emp'];
 /** what every player spawns with (slot 0, slot 1) */
 export const START_KIT: [WeaponId, WeaponId] = ['blaster', 'vector'];
-/**
- * Weapons supply drops can contain on this map, by earliest wave. Never empty:
- * early waves get the wave-2 tier, and a map whose roster is all late-tier falls back to the whole roster.
- */
-export function dropPool(mapWeapons: readonly WeaponId[], wave: number): WeaponId[] {
-  const tier = Math.max(2, wave);
-  const roster = mapWeapons.filter((id) => WEAPONS[id] && !START_KIT.includes(id));
-  const pool = roster.filter((id) => WEAPONS[id].unlockWave <= tier);
-  return pool.length ? pool : roster;
-}
+/** every weapon supply drops can contain: the whole roster minus the start kit, on every map and every wave */
+export const DROP_WEAPONS: WeaponId[] = WEAPON_ORDER.filter((id) => !START_KIT.includes(id));
 
 // ---- Bombs (secondary) ----
 /** carried types + `bomblet` (spawned by CLUSTER, never carried) */

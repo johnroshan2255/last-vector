@@ -1,6 +1,6 @@
 import { Container, Sprite } from 'pixi.js';
 import { CHUNK_SIZE, TILE_SIZE } from '@shared/constants';
-import { TileGrid, TILE_ORE, N, S } from '@shared/sim/terrain';
+import { TileGrid, TILE_ORE, TILE_HARD, TILE_SAND, HARD_HP, N, S } from '@shared/sim/terrain';
 import type { TileAtlas } from '../levels/TileAtlas';
 
 const T = TILE_SIZE;
@@ -15,6 +15,9 @@ interface Chunk {
 
 /**
  * Renders a TileGrid as chunked sprite containers culled to the camera.
+ * Every chunk is cached as one texture (256 tile sprites → one quad), and only
+ * re-rendered when one of its tiles changes, so a zoomed-out view of the whole
+ * cave costs a few dozen quads instead of thousands of sprites.
  * Pure view: colliders live in the shared sim (TileColliders).
  */
 export class TileMapView {
@@ -26,9 +29,15 @@ export class TileMapView {
   private fringeTop: (Sprite | null)[];
   private fringeBot: (Sprite | null)[];
   private oreSprites: (Sprite | null)[];
+  /** crack overlays on damaged hard stone */
+  private crackSprites: (Sprite | null)[];
+
   visibleChunks = 0;
   spriteCount = 0;
   private growing: { i: number; t: number }[] = [];
+  /** chunks whose cached texture is stale */
+  private dirty = new Set<Chunk>();
+  private ready = false;
 
   constructor(
     readonly grid: TileGrid,
@@ -39,6 +48,7 @@ export class TileMapView {
     this.fringeTop = new Array(n).fill(null);
     this.fringeBot = new Array(n).fill(null);
     this.oreSprites = new Array(n).fill(null);
+    this.crackSprites = new Array(n).fill(null);
     this.chunksX = Math.ceil(grid.w / CHUNK_SIZE);
     this.chunksY = Math.ceil(grid.h / CHUNK_SIZE);
     for (let cy = 0; cy < this.chunksY; cy++) {
@@ -53,6 +63,29 @@ export class TileMapView {
       }
     }
     for (let y = 0; y < grid.h; y++) for (let x = 0; x < grid.w; x++) this.refreshTile(x, y);
+    for (const c of this.chunks) c.container.cacheAsTexture({ scaleMode: 'nearest', resolution: 1, antialias: false });
+    this.ready = true;
+  }
+
+  private markDirty(i: number): void {
+    if (this.ready) this.dirty.add(this.chunkFor(i % this.grid.w, Math.floor(i / this.grid.w)));
+  }
+
+  /** re-render the cached textures of chunks that changed since last frame */
+  private flush(): void {
+    for (const c of this.dirty) c.container.updateCacheTexture();
+    this.dirty.clear();
+  }
+
+  /** zoomed out: sample the cached chunks smoothly (nearest-neighbour downscaling crawls as you move) */
+  setSmooth(on: boolean): void {
+    const mode = on ? 'linear' : 'nearest';
+    for (const c of this.chunks) {
+      const rg = c.container.renderGroup;
+      if (!rg) continue;
+      rg.textureOptions.scaleMode = mode;
+      if (rg.texture) rg.texture.source.scaleMode = mode;
+    }
   }
 
   private chunkFor(x: number, y: number): Chunk {
@@ -66,7 +99,8 @@ export class TileMapView {
     const chunk = this.chunkFor(x, y);
     if (solid) {
       const mask = g.mask(x, y);
-      const tex = g.scarred[i] ? this.atlas.scarred[mask] : this.atlas.rock[mask];
+      const m = g.tiles[i];
+      const tex = m === TILE_HARD ? this.atlas.hard[mask] : m === TILE_SAND ? this.atlas.sand[mask] : g.scarred[i] ? this.atlas.scarred[mask] : this.atlas.rock[mask];
       let s = this.sprites[i];
       if (!s) {
         s = new Sprite(tex);
@@ -85,6 +119,24 @@ export class TileMapView {
           this.oreSprites[i] = o;
         }
       } else this.remove(this.oreSprites, i);
+      // damaged hard stone shows cracks (3 stages)
+      if (m === TILE_HARD && g.hp[i] < HARD_HP) {
+        const stage = g.hp[i] > (HARD_HP * 2) / 3 ? 0 : g.hp[i] > HARD_HP / 3 ? 1 : 2;
+        let c = this.crackSprites[i];
+        if (!c) {
+          c = new Sprite(this.atlas.cracks[stage]);
+          c.x = x * T;
+          c.y = y * T;
+          chunk.fringe.addChild(c);
+          this.crackSprites[i] = c;
+        } else c.texture = this.atlas.cracks[stage];
+      } else this.remove(this.crackSprites, i);
+      // loose sand grows no moss or drips
+      if (m === TILE_SAND) {
+        this.remove(this.fringeTop, i);
+        this.remove(this.fringeBot, i);
+        return;
+      }
       if (!(mask & N)) {
         if (!this.fringeTop[i]) {
           const f = new Sprite(this.atlas.fringeTop[(x * 7 + y * 13) & 3]);
@@ -113,6 +165,7 @@ export class TileMapView {
       this.remove(this.fringeTop, i);
       this.remove(this.fringeBot, i);
       this.remove(this.oreSprites, i);
+      this.remove(this.crackSprites, i);
     }
   }
 
@@ -126,7 +179,10 @@ export class TileMapView {
 
   /** Re-render the given tile indices (from a 'carve' event or applyDestroyed). */
   applyChanges(indices: number[]): void {
-    for (const i of indices) this.refreshTile(i % this.grid.w, Math.floor(i / this.grid.w));
+    for (const i of indices) {
+      this.refreshTile(i % this.grid.w, Math.floor(i / this.grid.w));
+      this.markDirty(i);
+    }
   }
 
   /** rock currently on fire glows orange; everything else is reset to white */
@@ -135,6 +191,7 @@ export class TileMapView {
     for (const i of this.burningNow) if (!indices.includes(i)) {
       const s = this.sprites[i];
       if (s) s.tint = 0xffffff;
+      this.markDirty(i);
     }
     this.burningNow.clear();
     for (const i of indices) {
@@ -142,6 +199,7 @@ export class TileMapView {
       if (!s) continue;
       s.tint = Math.sin(time * 18 + i) > 0 ? 0xff9a4a : 0xffd080;
       this.burningNow.add(i);
+      this.markDirty(i);
     }
   }
 
@@ -152,6 +210,7 @@ export class TileMapView {
       if (s) {
         s.alpha = 0;
         this.growing.push({ i, t: 0 });
+        this.markDirty(i);
       }
     }
   }
@@ -160,6 +219,7 @@ export class TileMapView {
     for (let k = this.growing.length - 1; k >= 0; k--) {
       const g = this.growing[k];
       g.t += dt;
+      this.markDirty(g.i);
       const s = this.sprites[g.i];
       if (!s || g.t >= 0.35) {
         if (s) s.alpha = 1;
@@ -178,6 +238,7 @@ export class TileMapView {
       if (v) visible++;
     }
     this.visibleChunks = visible;
+    this.flush();
   }
 
   dispose(): void {

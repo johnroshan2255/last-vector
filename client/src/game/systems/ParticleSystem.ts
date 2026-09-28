@@ -56,11 +56,11 @@ export class ParticleSystem {
   }
 
   /** Burst of debris from a destroyed tile (world px). */
-  debris(x: number, y: number, tint: number, n = 6): void {
+  debris(x: number, y: number, tint: number, n = 6, minSize = 1): void {
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2;
       const sp = 40 + Math.random() * 80;
-      this.emit(x, y, Math.cos(a) * sp, Math.sin(a) * sp - 40, 0.4 + Math.random() * 0.5, tint, 1 + Math.random() * 2);
+      this.emit(x, y, Math.cos(a) * sp, Math.sin(a) * sp - 40, 0.4 + Math.random() * 0.5, tint, minSize + Math.random() * 2);
     }
   }
 

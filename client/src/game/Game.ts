@@ -17,6 +17,8 @@ import { Background } from './levels/Background';
 import { ParticleSystem } from './systems/ParticleSystem';
 import { InputSystem } from './systems/InputSystem';
 import { AudioSystem } from './systems/AudioSystem';
+import { TILE_HARD, TILE_SAND } from '@shared/sim/terrain';
+import { muzzlePoint } from '@shared/gunArt';
 import { TileMapView } from './views/TileMapView';
 import { EntityViews } from './views/EntityViews';
 import { FxLayer } from './views/FxLayer';
@@ -133,6 +135,7 @@ export class Game {
     this.viewport.onChange(({ vw, vh }) => {
       this.camera.resize(vw / this.zoom, vh / this.zoom);
       this.background?.resize(vw / this.zoom, vh / this.zoom);
+      this.background?.resizeScreen(vw, vh);
       this.lights?.resize(vw, vh);
       this.indicators?.resize(vw, vh);
     });
@@ -152,7 +155,7 @@ export class Game {
     this.setPhase('menu');
     this.loop = new GameLoop(
       (dt) => this.update(dt),
-      () => this.render(),
+      (alpha) => this.render(alpha),
     );
     this.loop.start();
     this.exposeDebug();
@@ -336,6 +339,8 @@ export class Game {
     this.tilemap.dispose();
     this.world.removeChildren();
     this.pixi.app.stage.removeChild(this.background.overlay);
+    this.pixi.app.stage.removeChild(this.background.screen);
+    this.background.screen.destroy({ children: true });
     this.background.container.destroy({ children: true });
     this.background.overlay.destroy({ children: true });
     this.worldBuilt = false;
@@ -367,13 +372,19 @@ export class Game {
     this.fx.shake = (m, s) => this.shake(m, s);
     this.fx.light = (x, y, r, ttl, color) => this.lights.flash(x, y, r, ttl, color);
     this.fx.onRegrow = (restored) => this.tilemap.markGrowing(restored);
+
     this.lights.gridW = source.grid.w;
     this.fx.toast = (text) => this.banner(text);
     this.world.addChild(this.background.container, this.tilemap.container, this.views.container, this.fx.container);
     this.pixi.app.stage.addChild(this.background.overlay);
+    // the fixed sky + clouds go under everything, in screen space
+    this.pixi.app.stage.addChildAt(this.background.screen, 0);
+    this.background.resizeScreen(svw, svh);
     // keep draw order: world, light map, vignette
     this.pixi.app.stage.setChildIndex(this.lights.sprite, this.pixi.app.stage.children.length - 2);
     this.snap = source.snapshot();
+    this.prevPos.clear();
+    this.smoothTiles = false;
     const me = this.localPlayer();
     const sx = me ? me.x * PPU : (source.match?.spawn.x ?? 100) * TILE_SIZE;
     const sy = me ? me.y * PPU : (source.match?.spawn.y ?? 56) * TILE_SIZE;
@@ -433,6 +444,9 @@ export class Game {
   private update(dt: number): void {
     if (!this.worldBuilt) return;
     this.time += dt;
+    // interpolation sources: where the camera and every entity were at the start of this step
+    this.camera.beginStep();
+    this.capturePrev();
 
     // menu / gameover: attract-mode camera drift; local sim keeps ticking (no player input)
     if (this.phase === 'lobby') {
@@ -454,7 +468,6 @@ export class Game {
       }
     }
     if (this.phase === 'menu' || this.phase === 'connecting' || this.phase === 'gameover' || this.phase === 'lobby') {
-      this.blendZoom(dt);
       this.menuDrift += dt;
       const m = this.source.match;
       const sp = m ? m.spawn : { x: 100, y: 56 };
@@ -462,7 +475,6 @@ export class Game {
       const cy = (sp.y + 2) * TILE_SIZE + Math.cos(this.menuDrift * 0.2) * 40;
       this.camera.lookX = this.camera.lookY = 0;
       this.camera.follow(cx, cy, dt * 0.25);
-      this.background.update(this.camera, dt);
       if (this.phase === 'gameover') {
         // keep the world alive so the death burst plays out
         const idle: PlayerInput = { seq: 0, moveX: 0, jet: false, fire: false, bomb: false, take: false, aimAngle: 0, weapon: 0, bombType: 0 };
@@ -480,7 +492,6 @@ export class Game {
     if (this.input.takeDebugToggle()) useGameStore.getState().setDebug({ show: !useGameStore.getState().debug.show });
     if (this.input.takeLagCycle()) this.setLag(this.lagMs === 0 ? 60 : this.lagMs === 60 ? 120 : this.lagMs === 120 ? 250 : 0);
     if (this.input.takeZoomToggle()) this.toggleZoom();
-    this.blendZoom(dt);
     if (this.input.takePause()) {
       if (this.phase === 'playing') this.pause();
       else if (this.phase === 'paused') this.resume();
@@ -557,7 +568,6 @@ export class Game {
         this.wasAlive = me.alive;
       }
     }
-    this.background.update(this.camera, dt);
 
     if (online) {
       this.netTimer += dt;
@@ -649,16 +659,102 @@ export class Game {
     });
   }
 
-  private render(): void {
+  /** debug: per-frame trace of what actually reached the screen (frame pacing / smoothness checks) */
+  private traceLog: { t: number; wx: number; wy: number; z: number; px: number; py: number; ms: number }[] | null = null;
+  /** entity positions at the start of the current sim step, keyed kind + id */
+  private prevPos = new Map<string, { x: number; y: number }>();
+  private lastRenderAt = 0;
+  /** tiles are sampled smoothly while zoomed out (nearest-neighbour downscaling crawls as you move) */
+  private smoothTiles = false;
+  /** debug: false draws the raw sim step (no interpolation), for before/after smoothness checks */
+  private interp = true;
+  /** debug: false skips the GPU present (frame-pacing probes at refresh rates the test display can't show) */
+  private present = true;
+
+  private capturePrev(): void {
+    const m = this.prevPos;
+    m.clear();
+    const s = this.snap;
+    if (!s) return;
+    for (const p of s.players) {
+      m.set('p' + p.id, { x: p.x, y: p.y });
+      m.set('b' + p.id, { x: p.beamEndX, y: p.beamEndY });
+    }
+    for (const a of s.aliens) m.set('a' + a.id, a);
+    for (const b of s.bombs) m.set('o' + b.id, b);
+    for (const d of s.drops) m.set('d' + d.id, d);
+    for (const k of s.pickups) m.set('k' + k.id, k);
+  }
+
+  /** the snapshot as it should look `alpha` of the way through the current step */
+  private renderSnap(alpha: number): Snapshot {
+    const s = this.snap;
+    const a = Math.min(1, Math.max(0, alpha));
+    if (!this.prevPos.size || a >= 0.999) return s;
+    const at = (key: string, x: number, y: number): { x: number; y: number } | null => {
+      const p = this.prevPos.get(key);
+      if (!p) return null;
+      const dx = x - p.x;
+      const dy = y - p.y;
+      if (dx * dx + dy * dy > 16) return null; // teleport / respawn: don't smear across the map
+      return { x: p.x + dx * a, y: p.y + dy * a };
+    };
+    const lerp = <T extends { id: string; x: number; y: number }>(kind: string, list: T[]): T[] =>
+      list.map((o) => {
+        const q = at(kind + o.id, o.x, o.y);
+        return q ? { ...o, x: q.x, y: q.y } : o;
+      });
+    return {
+      ...s,
+      players: s.players.map((p) => {
+        const q = at('p' + p.id, p.x, p.y);
+        const b = at('b' + p.id, p.beamEndX, p.beamEndY);
+        return q || b ? { ...p, ...(q ?? {}), ...(b ? { beamEndX: b.x, beamEndY: b.y } : {}) } : p;
+      }),
+      aliens: lerp('a', s.aliens),
+      bombs: lerp('o', s.bombs),
+      drops: lerp('d', s.drops),
+      pickups: lerp('k', s.pickups),
+    };
+  }
+
+  private applySmoothTiles(): void {
+    const smooth = this.zoom < 0.999;
+    if (smooth === this.smoothTiles) return;
+    this.smoothTiles = smooth;
+    this.tilemap.setSmooth(smooth);
+    this.background.setSmooth(smooth);
+  }
+
+  private render(alpha = 1): void {
     if (!this.worldBuilt) return;
-    this.views.sync(this.snap, this.time);
-    this.fx.draw(this.snap, this.time);
+    const t0 = performance.now();
+    // zoom eases per rendered frame (not per sim step) so it is even at any refresh rate
+    const now = performance.now();
+    const fdt = this.lastRenderAt ? Math.min(0.1, (now - this.lastRenderAt) / 1000) : 1 / 60;
+    this.lastRenderAt = now;
+    this.blendZoom(fdt);
+    this.applySmoothTiles();
+    if (!this.interp) alpha = 1;
+    this.camera.interpolate(alpha);
+    const snap = this.renderSnap(alpha);
+    this.views.sync(snap, this.time);
+    this.fx.draw(snap, this.time);
     this.camera.apply(this.world, this.zoom);
+    if (this.traceLog) {
+      const me = snap.players.find((p) => p.id === this.source.localId);
+      const w = this.world;
+      // where the local pilot lands on screen, in virtual px (after the world transform)
+      const px = me ? w.x + me.x * PPU * w.scale.x : 0;
+      const py = me ? w.y + me.y * PPU * w.scale.y : 0;
+      this.traceLog.push({ t: performance.now(), wx: w.x, wy: w.y, z: this.zoom, px, py, ms: 0 });
+    }
     this.tilemap.cull(this.camera.left, this.camera.top, this.camera.vw, this.camera.vh);
     const inGame = this.phase === 'playing' || this.phase === 'paused';
     this.indicators.container.visible = inGame;
-    if (inGame) this.indicators.draw(this.snap, this.camera, this.source.localId, (id) => this.nameOf(id), this.source.kind === 'net');
-    this.pixi.render();
+    if (inGame) this.indicators.draw(snap, this.camera, this.source.localId, (id) => this.nameOf(id), this.source.kind === 'net');
+    if (this.present) this.pixi.render();
+    if (this.traceLog?.length) this.traceLog[this.traceLog.length - 1].ms = performance.now() - t0;
     // Light map for the *next* frame. Rendering to a texture before the main
     // pass corrupts Pixi's particle batcher state on some GPUs/viewports.
     this.lights.draw(this.snap, this.camera, this.phase === 'menu' || this.phase === 'connecting', this.time, this.background.windowLights(this.camera, this.camera.vw, this.camera.vh));
@@ -723,11 +819,20 @@ export class Game {
           visibleChunks: this.tilemap.visibleChunks,
           particles: fx.particles,
           tracers: fx.tracers,
+          bolts: fx.bolts,
+          pixelFx: fx.pixelFx,
+          sfx: { ...this.audio.log },
+          backdrop: this.background.debug,
+          gun: p ? this.views.gunDebug(p.id, p.weapon) : null,
+          muzzle: p ? muzzlePoint(p.x, p.y, p.aimAngle, p.weapon) : null,
+          camera: [this.camera.left, this.camera.top],
+          hardTiles: this.source.grid.tiles.reduce((n, t) => n + (t === TILE_HARD ? 1 : 0), 0),
+          sandTiles: this.source.grid.tiles.reduce((n, t) => n + (t === TILE_SAND ? 1 : 0), 0),
           tilesDestroyed: this.source.destroyedCount,
           bombsLive: snap.bombs.length,
           bombs: snap.bombs,
           drops: snap.drops.length,
-          dropList: snap.drops.map((d) => ({ weapon: d.weapon, bomb: d.bomb, landed: d.landed })),
+          dropList: snap.drops.map((d) => ({ weapon: d.weapon, bomb: d.bomb, landed: d.landed, x: d.x, y: d.y })),
           burningTiles: snap.burning.length,
           bombCounts: p?.bombCounts ?? [],
           clouds: snap.clouds.length,
@@ -777,6 +882,21 @@ export class Game {
       /** current death / respawn state (online) */
       death: () => useGameStore.getState().hud.death,
       setZoom: (z: number) => this.setZoom(z),
+      /** start / stop a render trace; stop returns the frames */
+      setInterp: (on: boolean) => {
+        this.interp = on;
+      },
+      setPresent: (on: boolean) => {
+        this.present = on;
+      },
+      traceStart: () => {
+        this.traceLog = [];
+      },
+      traceStop: () => {
+        const t = this.traceLog ?? [];
+        this.traceLog = null;
+        return t;
+      },
       setScope: (on: boolean) => this.setScope(on),
       take: () => this.take(),
       /** tests: clear an EMP jam */
@@ -872,6 +992,75 @@ export class Game {
         return best;
       },
       damagePlayer: (n: number) => m()?.damagePlayer('local', n) ?? -1,
+      /**
+       * tests: dig out the rock under the nearest sand pocket and stand the pilot beside it
+       * (sand must stay put). Returns the sand tile, or null.
+       */
+      undermineSand: () => {
+        const mm = m();
+        const pl = mm?.players.get('local');
+        if (!mm || !pl) return null;
+        const g = mm.grid;
+        const p = pl.position;
+        let best: { x: number; y: number } | null = null;
+        let bd = Infinity;
+        for (let y = 3; y < g.h - 4; y++)
+          for (let x = 3; x < g.w - 3; x++) {
+            if (g.get(x, y) !== TILE_SAND || !g.isSolid(x, y + 1) || g.get(x, y + 1) === TILE_SAND) continue;
+            const d = Math.hypot(x - p.x, y - p.y);
+            if (d < bd) {
+              bd = d;
+              best = { x, y };
+            }
+          }
+        if (!best) return null;
+        mm.carve(best.x + 0.5, best.y + 2.5, 1.6);
+        // a pocket to stand in right next to the collapse
+        mm.carve(best.x - 4.5, best.y + 2, 1.8);
+        pl.body.setTranslation({ x: best.x - 4.5, y: best.y + 2 }, true);
+        pl.body.setLinvel({ x: 0, y: 0 }, true);
+        return best;
+      },
+      /** tests: the material of a tile (0 air, 1 rock, 2 ore, 3 hard stone, 4 sand) */
+      tileAt: (x: number, y: number) => m()?.grid.get(x, y) ?? -1,
+      /** tests: hit the nearest hard stone with `power`; returns { hp, material } after the hit */
+      hitHardStone: (power = 2) => {
+        const mm = m();
+        const p = me();
+        if (!mm || !p) return null;
+        const g = mm.grid;
+        let best = -1;
+        let bd = Infinity;
+        for (let i = 0; i < g.tiles.length; i++) {
+          if (g.tiles[i] !== TILE_HARD) continue;
+          const x = i % g.w;
+          const y = (i - x) / g.w;
+          const d = Math.hypot(x - p.x, y - p.y);
+          if (d < bd) {
+            bd = d;
+            best = i;
+          }
+        }
+        if (best < 0) return null;
+        const x = best % g.w;
+        const y = (best - x) / g.w;
+        mm.carve(x + 0.5, y + 0.5, 0.4, power);
+        return { i: best, hp: g.hp[best], material: g.tiles[best] };
+      },
+      /** tests: the local player takes no damage while on */
+      setGod: (on: boolean) => {
+        const pl = m()?.players.get('local');
+        if (pl) pl.god = on;
+        return !!pl;
+      },
+      /** tests: stand the local player at (x, y) units (e.g. next to a landed crate) */
+      teleportTo: (x: number, y: number) => {
+        const pl = m()?.players.get('local');
+        if (!pl) return false;
+        pl.body.setTranslation({ x, y }, true);
+        pl.body.setLinvel({ x: 0, y: 0 }, true);
+        return true;
+      },
       /** tests: put the local player back on the spawn slot (the weapon sweep can dig the floor away) */
       teleportSpawn: () => {
         const mm = m();

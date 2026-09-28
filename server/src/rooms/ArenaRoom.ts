@@ -12,7 +12,7 @@ import {
   TICK_RATE,
 } from '../../../shared/src/constants.js';
 import { DEFAULT_MAP, MAPS, isMapId, type MapId } from '../../../shared/src/maps.js';
-import { ClientMessage, ServerMessage, type JoinOptions, type WelcomeMessage } from '../../../shared/src/types.js';
+import { ClientMessage, ServerMessage, type JoinOptions, type TilesMessage, type WelcomeMessage } from '../../../shared/src/types.js';
 import { Match } from '../../../shared/src/sim/match.js';
 import type { SimEvent, Snapshot } from '../../../shared/src/sim/events.js';
 
@@ -20,6 +20,7 @@ let rapierReady: Promise<unknown> | null = null;
 
 /** codes currently in use on this process (avoid handing out duplicates) */
 const liveCodes = new Set<string>();
+const emptyTiles = (): TilesMessage => ({ o: [], d: [], m: [], c: [], r: [] });
 
 export function makeRoomCode(): string {
   for (let attempt = 0; attempt < 50; attempt++) {
@@ -64,8 +65,7 @@ export class ArenaRoom extends Room<ArenaState> {
   private match!: Match;
   private inputCount = new Map<string, number>();
   private pendingEvents: SimEvent[] = [];
-  private pendingTiles: number[] = [];
-  private pendingRestored: number[] = [];
+  private pendingTiles: TilesMessage = emptyTiles();
   private acc = 0;
   private last = 0;
   private code = '';
@@ -139,7 +139,7 @@ export class ArenaRoom extends Room<ArenaState> {
       id: client.sessionId,
       seed: this.match.seed,
       biome: this.match.biome,
-      destroyed: this.match.destroyedLog,
+      tiles: this.match.tileDiff,
       tick: this.match.tick,
       code: this.code,
       maxPlayers: MAX_PLAYERS_PER_ROOM,
@@ -182,9 +182,13 @@ export class ArenaRoom extends Room<ArenaState> {
     let steps = 0;
     while (this.acc >= FIXED_DT && steps < 4) {
       const events = this.match.step(FIXED_DT);
+      this.pendingTiles.o.push(...this.match.grid.ops);
       for (const e of events) {
-        if (e.t === 'carve') this.pendingTiles.push(...e.destroyed);
-        else if (e.t === 'regrow') this.pendingRestored.push(...e.restored);
+        if (e.t === 'carve') {
+          this.pendingTiles.d.push(...e.destroyed);
+          this.pendingTiles.m.push(...e.mats);
+          this.pendingTiles.c.push(...e.chipped);
+        } else if (e.t === 'regrow') this.pendingTiles.r.push(...e.restored);
         else this.pendingEvents.push(e);
       }
       this.acc -= FIXED_DT;
@@ -192,10 +196,9 @@ export class ArenaRoom extends Room<ArenaState> {
     }
     if (steps) {
       this.mirror(this.match.snapshot());
-      if (this.pendingTiles.length || this.pendingRestored.length) {
-        this.broadcast(ServerMessage.Tiles, { d: this.pendingTiles, r: this.pendingRestored });
-        this.pendingTiles = [];
-        this.pendingRestored = [];
+      if (this.pendingTiles.o.length) {
+        this.broadcast(ServerMessage.Tiles, this.pendingTiles);
+        this.pendingTiles = emptyTiles();
       }
       if (this.pendingEvents.length) {
         this.broadcast(ServerMessage.Events, this.pendingEvents);

@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import RAPIER from '@dimforge/rapier2d-compat';
 import { Match } from '../src/sim/match.js';
 import { FIXED_DT, PLAYER, PVP } from '../src/constants.js';
-import { WEAPON_ORDER, HEAT, BOMBS, BOMB_ORDER, WEAPONS, START_KIT, dropPool } from '../src/weapons.js';
+import { WEAPON_ORDER, HEAT, BOMBS, BOMB_ORDER, START_KIT, DROP_WEAPONS } from '../src/weapons.js';
 import { MAPS, MAP_ORDER } from '../src/maps.js';
 import type { PlayerInput } from '../src/types.js';
 
@@ -75,7 +75,8 @@ describe('Match (headless, shared sim)', () => {
       const ev = run(m, 'p1', 50, { weapon: slot, fire: true, aimAngle: Math.PI * 0.3 }, seq);
       expect(p.weapons.current, id).toBe(id);
       const digs = ['flamer', 'plasma', 'emp'].includes(id) ? false : true; // flame burns instead; plasma blasts are tiny; emp doesn't dig
-      if (digs) expect(m.destroyedTotal, `${id} carves`).toBeGreaterThan(before);
+      // hits rock: breaks it, or chips hard stone (which needs several hits)
+      if (digs) expect(m.destroyedTotal > before || ev.some((e) => e.t === 'carve' && e.chipped.length > 0), `${id} carves`).toBe(true);
       expect(p.weapons.heat, `${id} heat`).toBeGreaterThan(3);
       expect(ev.some((e) => e.t === 'shot' || e.t === 'carve' || e.t === 'rail' || e.t === 'arc' || e.t === 'beamDig'), `${id} fx`).toBe(true);
       run(m, 'p1', 10, { weapon: slot }, seq);
@@ -176,34 +177,34 @@ describe('Match (headless, shared sim)', () => {
       m.setInput('b', idle(i + 1));
       m.step(FIXED_DT);
     }
-    const before = m.destroyedLog.length;
+    const before = m.tileDiff.length;
     for (let i = 0; i < 40; i++) {
       m.setInput('a', idle(100 + i, { weapon: 1, fire: true, aimAngle: Math.PI / 2 }));
       m.setInput('b', idle(100 + i));
       m.step(FIXED_DT);
     }
-    expect(m.destroyedLog.length).toBeGreaterThan(before);
+    expect(m.tileDiff.length).toBeGreaterThan(before);
     expect(m.destroyedTotal).toBeGreaterThan(before);
     // a fresh match with the same seed replays the log to the same grid
     const m2 = new Match(RAPIER, { seed: 7, map: 'furnace', waves: false, drops: false });
-    m2.applyDestroyed(m.destroyedLog);
+    m2.applyTileOps(m.tileDiff);
     expect(Buffer.from(m2.grid.tiles).equals(Buffer.from(m.grid.tiles))).toBe(true);
     m.destroy();
     m2.destroy();
   });
 
-  it('every map has a non-empty drop pool of valid weapons, and its own bomb kit', () => {
+  it('every weapon drops on every map and wave; each map has its own bomb kit', () => {
+    // the drop roster is the whole arsenal minus the start kit
+    expect([...DROP_WEAPONS].sort()).toEqual(WEAPON_ORDER.filter((w) => !START_KIT.includes(w)).sort());
     for (const id of MAP_ORDER) {
       const map = MAPS[id];
-      for (let w = 0; w < 8; w++) {
-        const pool = dropPool(map.weapons, w);
-        expect(pool.length, `${id} wave ${w}`).toBeGreaterThan(0);
-        for (const p of pool) {
-          expect(WEAPONS[p]).toBeTruthy();
-          expect(START_KIT.includes(p)).toBe(false);
-          expect(map.weapons.includes(p)).toBe(true);
-        }
-      }
+      // weapon crates come from a shuffle bag: the first N crates on any map are all N weapons, even in wave 1
+      const m = new Match(RAPIER, { seed: 11, map: id, waves: false, drops: true });
+      const seen = new Set<string>();
+      const pick = (m as unknown as { nextDropWeapon(): string }).nextDropWeapon.bind(m);
+      for (let i = 0; i < DROP_WEAPONS.length; i++) seen.add(pick());
+      expect(seen.size, `${id} drop bag`).toBe(DROP_WEAPONS.length);
+      m.destroy();
       expect(map.bombs.length).toBeGreaterThanOrEqual(3);
       for (const b of map.bombs) expect(BOMBS[b]).toBeTruthy();
     }
@@ -211,7 +212,6 @@ describe('Match (headless, shared sim)', () => {
     expect(MAP_ORDER.length).toBe(3);
     expect(new Set(MAP_ORDER.map((m) => MAPS[m].terrain.layout)).size).toBe(3);
     expect(new Set(MAP_ORDER.map((m) => MAPS[m].biome)).size).toBe(3);
-    expect(MAPS.rift.weapons).toContain('sniper');
     // one open-sky map, two caves
     expect(MAP_ORDER.filter((m) => MAPS[m].sky).length).toBe(1);
     expect(MAP_ORDER.filter((m) => !MAPS[m].sky).every((m) => !MAPS[m].terrain.openTop)).toBe(true);
@@ -243,7 +243,7 @@ describe('Match (headless, shared sim)', () => {
     const ev = run(m, 'p1', 60 * 2.5, {}, seq); // 5.5 s total: regrown
     expect(m.grid.countSolid()).toBe(solid0);
     expect(ev.some((e) => e.t === 'regrow')).toBe(true);
-    expect(m.destroyedLog.length).toBe(0);
+    expect(m.tileDiff.length).toBe(0);
     // the pocket the player is standing in must NOT close on them
     const under = p.position;
     m.carve(under.x, under.y + 0.6, 0.8);

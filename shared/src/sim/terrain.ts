@@ -4,6 +4,16 @@ import { Rng } from './rng.js';
 export const TILE_AIR = 0;
 export const TILE_ROCK = 1;
 export const TILE_ORE = 2; // rock with an embedded shard
+/** tough stone (Blastronaut-style): takes several hits, explosions crack it fastest */
+export const TILE_HARD = 3;
+/** sand: soft blocks that break in one hit (they don't fall) */
+export const TILE_SAND = 4;
+/** hit points of a fresh hard-rock tile (fits the 4-bit hp field of a tile op) */
+export const HARD_HP = 12;
+
+/** a tile op packs material and hit points: material | hp << 4 */
+export const opCode = (material: number, hp: number): number => material | (hp << 4);
+const fullHp = (material: number): number => (material === TILE_HARD ? HARD_HP : 1);
 
 /** Neighbour bitmask bits for autotiling. */
 export const N = 1;
@@ -22,12 +32,88 @@ export class TileGrid {
   readonly tiles: Uint8Array;
   /** 1 if this tile became exposed through destruction (draw excavated look) */
   readonly scarred: Uint8Array;
+  /** the generated material of every tile: regrowth puts this back (ore regrows as plain rock) */
+  readonly base: Uint8Array;
+  /** hit points left (hard rock loses them per hit; everything else has 1) */
+  readonly hp: Uint8Array;
+  /**
+   * Every change after generation, in order, as flat [index, opCode] pairs. The server
+   * forwards these so clients replay carving / cracks / regrowth exactly.
+   */
+  ops: number[] = [];
+  private recording = false;
 
   constructor(w = MAP_W, h = MAP_H) {
     this.w = w;
     this.h = h;
     this.tiles = new Uint8Array(w * h);
     this.scarred = new Uint8Array(w * h);
+    this.base = new Uint8Array(w * h);
+    this.hp = new Uint8Array(w * h);
+  }
+
+  /** generation finished: remember the original materials and start recording ops */
+  finalize(): void {
+    this.base.set(this.tiles);
+    for (let i = 0; i < this.tiles.length; i++) this.hp[i] = fullHp(this.tiles[i]);
+    this.scarred.fill(0); // settling sand during generation is not damage
+    this.ops = [];
+    this.recording = true;
+  }
+
+  private put(i: number, material: number, hp = fullHp(material)): void {
+    this.tiles[i] = material;
+    this.hp[i] = hp;
+    if (this.recording) this.ops.push(i, opCode(material, hp));
+  }
+
+  /** i + its 4 neighbours (whatever may need re-rendering / new colliders) */
+  private around(i: number, out: number[] = []): number[] {
+    const x = i % this.w;
+    const y = (i - x) / this.w;
+    out.push(i);
+    if (y > 0) out.push(i - this.w);
+    if (x < this.w - 1) out.push(i + 1);
+    if (y < this.h - 1) out.push(i + this.w);
+    if (x > 0) out.push(i - 1);
+    return out;
+  }
+
+  /** clear a tile to air and scar the solid tiles it exposed */
+  private clear(i: number, out: number[]): void {
+    this.put(i, TILE_AIR, 0);
+    const from = out.length;
+    this.around(i, out);
+    for (let k = from + 1; k < out.length; k++) if (this.tiles[out[k]] !== TILE_AIR) this.scarred[out[k]] = 1;
+  }
+
+  /** apply ops recorded by another grid (server → client); returns the indices that changed */
+  applyOps(ops: number[]): number[] {
+    const out: number[] = [];
+    for (let k = 0; k + 1 < ops.length; k += 2) {
+      const i = ops[k];
+      if (i < 0 || i >= this.tiles.length) continue;
+      const m = ops[k + 1] & 15;
+      const hp = ops[k + 1] >> 4;
+      if (m === TILE_AIR) {
+        if (this.tiles[i] !== TILE_AIR) this.clear(i, out);
+        continue;
+      }
+      if (this.tiles[i] === TILE_AIR && m === TILE_ROCK) this.scarred[i] = 1;
+      this.put(i, m, hp);
+      this.around(i, out);
+    }
+    return out;
+  }
+
+  /** everything that differs from the generated cave, as ops (late joiners replay it) */
+  diff(): number[] {
+    const out: number[] = [];
+    for (let i = 0; i < this.tiles.length; i++) {
+      const t = this.tiles[i];
+      if (t !== this.base[i] || (t === TILE_HARD && this.hp[i] !== HARD_HP)) out.push(i, opCode(t, this.hp[i]));
+    }
+    return out;
   }
 
   idx(x: number, y: number): number {
@@ -46,6 +132,12 @@ export class TileGrid {
 
   get(x: number, y: number): number {
     return this.inBounds(x, y) ? this.tiles[this.idx(x, y)] : TILE_ROCK;
+  }
+
+  /** only plain rock (and ore) catches fire; stone and sand don't burn */
+  burns(x: number, y: number): boolean {
+    const t = this.get(x, y);
+    return t === TILE_ROCK || t === TILE_ORE;
   }
 
   set(x: number, y: number, v: number): void {
@@ -79,73 +171,100 @@ export class TileGrid {
    */
   destroy(x: number, y: number): number[] {
     if (!this.inBounds(x, y) || this.tiles[this.idx(x, y)] === TILE_AIR) return [];
-    this.tiles[this.idx(x, y)] = TILE_AIR;
-    const changed = [this.idx(x, y)];
-    const nb: [number, number][] = [
-      [x, y - 1],
-      [x + 1, y],
-      [x, y + 1],
-      [x - 1, y],
-    ];
-    for (const [nx, ny] of nb) {
-      if (!this.inBounds(nx, ny)) continue;
-      const i = this.idx(nx, ny);
-      if (this.tiles[i] !== TILE_AIR) this.scarred[i] = 1;
-      changed.push(i);
-    }
-    return changed;
+    const out: number[] = [];
+    this.clear(this.idx(x, y), out);
+    return out;
   }
 
-  /** Put rock back (regrowth). Returns changed indices (tile + 4 neighbours). */
+  /** Regrowth: put the generated material back (ore regrows as rock). Nothing grows where the cave was open. */
   restore(x: number, y: number): number[] {
     if (!this.inBounds(x, y) || this.tiles[this.idx(x, y)] !== TILE_AIR) return [];
     const i = this.idx(x, y);
-    this.tiles[i] = TILE_ROCK;
+    const m = this.base[i] === TILE_ORE ? TILE_ROCK : this.base[i];
+    if (m === TILE_AIR) return [];
+    this.put(i, m);
     this.scarred[i] = 1;
-    const changed = [i];
-    for (const [nx, ny] of [
-      [x, y - 1],
-      [x + 1, y],
-      [x, y + 1],
-      [x - 1, y],
-    ] as [number, number][]) {
-      if (this.inBounds(nx, ny)) changed.push(this.idx(nx, ny));
-    }
-    return changed;
+    return this.around(i);
   }
 
   /**
-   * Destroy every tile within `radius` tiles of (cx, cy).
-   * Returns deduped `changed` indices (for re-rendering) and `destroyed` indices (for FX).
+   * One step of loose-sand settling (terrain generation only: sand does not fall in play). Sand drops straight down into air, or slides
+   * diagonally off a pile when both the side and the diagonal are open. Scans
+   * bottom-up so a whole column falls together. `blocked` cells (bodies) hold sand up.
+   * Returns the indices that changed and the cells sand moved into.
+   */
+  stepSand(blocked: (x: number, y: number) => boolean, flip: boolean): { changed: number[]; moved: number[] } {
+    const changed: number[] = [];
+    const moved: number[] = [];
+    const { w, h, tiles } = this;
+    const open = (x: number, y: number) => this.inBounds(x, y) && tiles[y * w + x] === TILE_AIR && !blocked(x, y);
+    for (let y = h - 2; y >= 0; y--) {
+      for (let k = 0; k < w; k++) {
+        const x = flip ? w - 1 - k : k;
+        const i = y * w + x;
+        if (tiles[i] !== TILE_SAND) continue;
+        let to = -1;
+        if (open(x, y + 1)) to = i + w;
+        else {
+          const d = (x + y + (flip ? 1 : 0)) & 1 ? 1 : -1;
+          if (open(x + d, y) && open(x + d, y + 1)) to = i + w + d;
+          else if (open(x - d, y) && open(x - d, y + 1)) to = i + w - d;
+        }
+        if (to < 0) continue;
+        this.clear(i, changed);
+        this.put(to, TILE_SAND);
+        this.around(to, changed);
+        moved.push(to);
+      }
+    }
+    return { changed, moved };
+  }
+
+  /**
+   * Hit every tile within `radius` tiles of (cx, cy) with `power`. Plain rock, ore and sand
+   * break at once; hard rock loses `power` hit points and only breaks at 0 (else it is `chipped`).
+   * Returns deduped `changed` indices (for re-rendering), `destroyed` (for FX) and `mats` (what each destroyed tile was).
    */
   destroyRadius(
     cx: number,
     cy: number,
     radius: number,
-  ): { changed: number[]; destroyed: number[]; ore: number[] } {
+    power = 1,
+    hitTile?: { x: number; y: number },
+  ): { changed: number[]; destroyed: number[]; ore: number[]; mats: number[]; chipped: number[] } {
     const changed = new Set<number>();
     const destroyed: number[] = [];
     const ore: number[] = [];
+    const mats: number[] = [];
+    const chipped: number[] = [];
     const r2 = radius * radius;
-    const x0 = Math.floor(cx - radius);
-    const x1 = Math.ceil(cx + radius);
-    const y0 = Math.floor(cy - radius);
-    const y1 = Math.ceil(cy + radius);
+    const x0 = Math.min(Math.floor(cx - radius), hitTile?.x ?? Infinity);
+    const x1 = Math.max(Math.ceil(cx + radius), hitTile?.x ?? -Infinity);
+    const y0 = Math.min(Math.floor(cy - radius), hitTile?.y ?? Infinity);
+    const y1 = Math.max(Math.ceil(cy + radius), hitTile?.y ?? -Infinity);
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         const dx = x + 0.5 - cx;
         const dy = y + 0.5 - cy;
-        if (dx * dx + dy * dy > r2) continue;
-        const wasOre = this.get(x, y) === TILE_ORE;
-        const ch = this.destroy(x, y);
-        if (ch.length) {
-          destroyed.push(ch[0]);
-          if (wasOre) ore.push(ch[0]);
+        // the tile the hit lands in always takes it, even when a small dig circle misses its centre
+        const centre = hitTile ? x === hitTile.x && y === hitTile.y : x === Math.floor(cx) && y === Math.floor(cy);
+        if ((!centre && dx * dx + dy * dy > r2) || !this.inBounds(x, y)) continue;
+        const i = this.idx(x, y);
+        const m = this.tiles[i];
+        if (m === TILE_AIR) continue;
+        if (m === TILE_HARD && this.hp[i] > power) {
+          this.put(i, TILE_HARD, this.hp[i] - power);
+          chipped.push(i);
+          changed.add(i);
+          continue;
         }
-        for (const i of ch) changed.add(i);
+        for (const c of this.destroy(x, y)) changed.add(c);
+        destroyed.push(i);
+        mats.push(m);
+        if (m === TILE_ORE) ore.push(i);
       }
     }
-    return { changed: [...changed], destroyed, ore };
+    return { changed: [...changed], destroyed, ore, mats, chipped };
   }
 }
 
@@ -240,7 +359,70 @@ export function generateTerrain(seed: number, w = MAP_W, h = MAP_H, style: Terra
     if (grid.tiles[i] === TILE_ROCK && rng.chance(ORE_CHANCE)) grid.tiles[i] = TILE_ORE;
   }
 
+  // 6. Blastronaut-style materials: veins of hard stone and pockets of loose sand
+  placeMaterials(grid, new Rng(seed ^ 0x5a17c0de), style, spawn, borderThickness);
+
+  grid.finalize();
   return { grid, spawn };
+}
+
+/** blobs of hard stone and sand in the rock, away from the spawn; sand is settled so the match starts still */
+function placeMaterials(grid: TileGrid, rng: Rng, style: TerrainStyle, spawn: { x: number; y: number }, border: number): void {
+  const { w, h } = grid;
+  const keepOut = (x: number, y: number) => Math.abs(x - spawn.x) < TERRAIN.spawnPocketRadius + 8 && Math.abs(y - spawn.y) < TERRAIN.spawnPocketRadius + 10;
+  const overSpawn = (x: number, y: number) => Math.abs(x - spawn.x) < TERRAIN.spawnPocketRadius + 8 && y < spawn.y + TERRAIN.spawnPocketRadius + 10;
+  const inner = (x: number, y: number) => x > border && y > border && x < w - 1 - border && y < h - 1 - border;
+  const paint = (cx: number, cy: number, rx: number, ry: number, material: number) => {
+    for (let y = Math.floor(cy - ry); y <= Math.ceil(cy + ry); y++) {
+      for (let x = Math.floor(cx - rx); x <= Math.ceil(cx + rx); x++) {
+        const dx = (x + 0.5 - cx) / rx;
+        const dy = (y + 0.5 - cy) / ry;
+        // lumpy edge
+        if (dx * dx + dy * dy > 0.75 + rng.next() * 0.5 || !inner(x, y) || keepOut(x, y)) continue;
+        // sand never hangs over the spawn: it would settle into the pocket
+        if (material === TILE_SAND && overSpawn(x, y)) continue;
+        const t = grid.get(x, y);
+        if (t === TILE_ROCK || (t === TILE_ORE && material === TILE_HARD)) grid.set(x, y, material);
+      }
+    }
+  };
+  /** a random solid tile to grow a blob from */
+  const pick = (): { x: number; y: number } | null => {
+    for (let k = 0; k < 40; k++) {
+      const x = rng.int(border + 2, w - border - 3);
+      const y = rng.int(border + 2, h - border - 3);
+      if (grid.get(x, y) === TILE_ROCK && !keepOut(x, y)) return { x, y };
+    }
+    return null;
+  };
+  // hard veins: short random walks of fat stone
+  for (let k = 0; k < (style.hardVeins ?? 12); k++) {
+    const p = pick();
+    if (!p) continue;
+    let { x, y } = p;
+    let a = rng.next() * Math.PI * 2;
+    const steps = 6 + rng.int(0, 10);
+    for (let s = 0; s < steps; s++) {
+      paint(x, y, 1.6 + rng.next() * 1.4, 1.3 + rng.next() * 1.1, TILE_HARD);
+      a += (rng.next() - 0.5) * 0.9;
+      x += Math.cos(a) * 2;
+      y += Math.sin(a) * 2;
+    }
+  }
+  // sand pockets: wide lenses, preferably sitting above open cave so digging under them brings them down
+  for (let k = 0; k < (style.sandPockets ?? 20); k++) {
+    let p = pick();
+    for (let tries = 0; p && tries < 6; tries++) {
+      let airBelow = false;
+      for (let d = 2; d < 9 && !airBelow; d++) if (!grid.isSolid(p.x, p.y + d)) airBelow = true;
+      if (airBelow) break;
+      p = pick();
+    }
+    if (!p) continue;
+    paint(p.x, p.y, 3 + rng.next() * 4, 2 + rng.next() * 2, TILE_SAND);
+  }
+  // settle the pockets into natural piles once, at generation
+  for (let k = 0; k < h; k++) if (!grid.stepSand(() => false, (k & 1) === 1).moved.length) break;
 }
 
 /** carve a disc of air */

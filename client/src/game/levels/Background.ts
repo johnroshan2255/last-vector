@@ -1,7 +1,7 @@
-import { Container, Graphics, Sprite, Texture } from 'pixi.js';
+import { Container, Graphics, Sprite, Texture, TilingSprite } from 'pixi.js';
 import { BIOMES, MAP_H, MAP_W, TILE_SIZE, type BiomeId } from '@shared/constants';
 import { generateTerrain } from '@shared/sim/terrain';
-import type { MapDef, SkyDef } from '@shared/maps';
+import { MAPS, type BackdropDef, type MapDef, type SkyDef } from '@shared/maps';
 import type { TileAtlas } from './TileAtlas';
 import type { Camera } from '../engine/Camera';
 
@@ -34,46 +34,89 @@ function canvasTexture(w: number, h: number, paint: (ctx: CanvasRenderingContext
 }
 
 /**
- * A layer that scrolls at `f` of the camera speed (0 = glued to the screen, 1 = world).
- * The node sits at world (ox, oy) when the camera is at (camX0, camY0) and drifts
- * by (1 - f) of any camera movement from there, i.e. it moves at f on screen.
+ * A tileable band of Blastronaut-style pixel cumulus: flat-bottomed clouds built from
+ * bumps, a sunlit rim on top, a shaded underside, hard 1px edges (no anti-aliasing).
+ * Drawn wrapped on both axes so it tiles seamlessly.
  */
-interface Parallax {
-  node: Container;
-  f: number;
-  ox: number;
-  oy: number;
-  camX0: number;
-  camY0: number;
-  /** screen-relative anchors (fractions of the view) re-applied on resize / zoom; undefined = fixed world anchor */
-  fx?: number;
-  fy?: number;
+function cloudBank(w: number, h: number, rng: () => number, colors: [number, number, number], n: number, scale: number): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d')!;
+  const [body, light, shade] = colors;
+  const clouds: { x: number; y: number; bumps: [number, number, number][]; wdt: number }[] = [];
+  for (let k = 0; k < n; k++) {
+    const wdt = (40 + rng() * 90) * scale;
+    const base = Math.floor(h * (0.15 + rng() * 0.75));
+    const x = rng() * w;
+    const bumps: [number, number, number][] = [];
+    const count = 3 + Math.floor(rng() * 4);
+    for (let b = 0; b < count; b++) {
+      const t = count === 1 ? 0.5 : b / (count - 1);
+      // taller in the middle, low at the ends
+      const r = (6 + rng() * 8 + Math.sin(t * Math.PI) * 10) * scale;
+      bumps.push([t * wdt, -r * 0.55, r]);
+    }
+    clouds.push({ x, y: base, bumps, wdt });
+  }
+  const shape = (dx: number, dy: number, grow: number) => {
+    for (const cl of clouds)
+      for (const ox of [-w, 0, w])
+        for (const oy of [-h, 0, h]) {
+          for (const [bx, by, r] of cl.bumps) {
+            ctx.beginPath();
+            ctx.arc(cl.x + bx + ox + dx, cl.y + by + oy + dy, r + grow, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          // flat base slab
+          ctx.fillRect(cl.x + ox + dx - 4 * scale, cl.y + oy + dy - 4 * scale, cl.wdt + 8 * scale, 6 * scale + grow);
+        }
+  };
+  ctx.fillStyle = hex(light);
+  shape(0, 0, 0);
+  ctx.fillStyle = hex(body);
+  shape(2, 3, -1);
+  // shaded underside: redraw the lower part of every cloud in the shade colour
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-atop';
+  ctx.fillStyle = hex(shade);
+  for (const cl of clouds)
+    for (const ox of [-w, 0, w])
+      for (const oy of [-h, 0, h]) ctx.fillRect(cl.x + ox - 6 * scale, cl.y + oy - 1 * scale, cl.wdt + 12 * scale, 10 * scale);
+  ctx.restore();
+  // chop off anything below the flat base, then harden the edges to pure pixels
+  const img = ctx.getImageData(0, 0, w, h);
+  for (let i = 3; i < img.data.length; i += 4) img.data[i] = img.data[i] > 110 ? 255 : 0;
+  ctx.putImageData(img, 0, 0);
+  return c;
 }
 
 /**
- * Cheap depth behind the cave. Caves: a second, sparser cave rendered as one
- * flattened texture at half speed, drifting dust motes, a vignette. Sky maps
- * add a gradient sky glued to the screen, a sun/moon, stars, a horizon
- * silhouette (pyramids / peaks / mesas) and a handful of drifting clouds.
+ * The Blastronaut-style backdrop, all of it static: a gradient sky and three banks of
+ * pixel clouds on a fixed screen layer, a dark back wall of rock locked to the world,
+ * and on open-sky maps a moon, stars and a skyline on the ground line.
  * Everything here is a handful of draw calls.
  */
 export class Background {
   readonly container = new Container(); // world-space parallax layer
   readonly overlay = new Container(); // screen-space vignette
+  /**
+   * Screen-space backdrop drawn behind the world: sky, clouds, stars, moon. Positioned once
+   * and never moved per frame, so it can't jitter against the cave (it just stays put).
+   */
+  readonly screen = new Container();
+  private sun: Container | null = null;
+  private sunAt = { x: 0, y: 0 };
   private far: Sprite;
-  private dust: Sprite[] = [];
   private vignette: Graphics;
-  private layers: Parallax[] = [];
   private skySprite: Sprite | null = null;
-  private clouds: { s: Sprite; speed: number; layer: Parallax }[] = [];
-  private cloudSpan = 0;
+  /** pixel cloud banks, fixed on screen; `x` is each bank's pattern offset */
+  private cloudBanks: { s: TilingSprite; x: number }[] = [];
+  private readonly backdrop: BackdropDef;
   /** lit window openings in the far layer (far-canvas px); they cast light through carved gaps */
   private windows: { x: number; y: number; r: number }[] = [];
   private readonly windowColor: number;
   private readonly sky: SkyDef | undefined;
-  private readonly motes: 'snow' | 'dust' | 'cave';
-  private vh = 0;
-  private horizonY = 0;
 
   constructor(
     seed: number,
@@ -87,8 +130,8 @@ export class Background {
     const T = TILE_SIZE;
     this.windowColor = Number('0x' + mixHex(p.fringe, 0xffffff, 0.5));
     this.sky = map?.sky;
-    this.motes = this.sky ? this.sky.motes === 'none' ? 'cave' : this.sky.motes : 'cave';
-    this.vh = vh;
+    this.backdrop = map?.backdrop ?? MAPS.hollow.backdrop;
+    const bd = this.backdrop;
     const worldW = MAP_W * T;
     const worldH = MAP_H * T;
 
@@ -96,8 +139,6 @@ export class Background {
       const sky = this.sky;
       // the camera position that frames the surface with the sky in the top half: sky-anchored layers key off it
       const horizonY = Math.floor(MAP_H * (map?.terrain.openTop ?? 0.4)) * T;
-      this.horizonY = horizonY;
-      const cam0 = horizonY - vh * 0.55;
       // gradient sky, glued to the screen (slightly taller so flying up shows a darker top)
       const grad = canvasTexture(
         4,
@@ -112,7 +153,7 @@ export class Background {
         false,
       );
       this.skySprite = new Sprite(grad);
-      this.container.addChild(this.skySprite);
+      this.screen.addChild(this.skySprite);
 
       // stars (night) – one texture, very slow parallax
       if (sky.stars) {
@@ -127,8 +168,7 @@ export class Background {
             }
           }),
         );
-        this.container.addChild(stars);
-        this.layers.push({ node: stars, f: 0.08, ox: 0, oy: 0, camX0: 0, camY0: 0 });
+        this.screen.addChild(stars);
       }
 
       // sun / moon: disc + soft glow, nearly fixed on screen
@@ -142,14 +182,14 @@ export class Background {
         glow.blendMode = 'add';
         const disc = new Graphics().circle(0, 0, sky.sun.r).fill(sky.sun.color);
         sun.addChild(glow, disc);
-        this.container.addChild(sun);
-        this.layers.push({ node: sun, f: 0.03, ox: sky.sun.x * vw, oy: cam0 + sky.sun.y * vh, camX0: 0, camY0: cam0, fx: sky.sun.x, fy: sky.sun.y });
+        this.screen.addChild(sun);
+        this.sun = sun;
+        this.sunAt = { x: sky.sun.x, y: sky.sun.y };
       }
 
       // horizon silhouette: one canvas band along the sky/ground line
       if (sky.horizon !== 'none') {
-        const f = 0.25;
-        const bw = vw + worldW * f + 64;
+        const bw = worldW + 64;
         const bh = 120;
         const band = new Sprite(
           canvasTexture(bw, bh, (ctx) => {
@@ -206,146 +246,85 @@ export class Background {
             }
           }),
         );
+        // the skyline sits on the ground line in the world, set once
+        band.x = 0;
+        band.y = horizonY - bh + 4;
         this.container.addChild(band);
-        this.layers.push({ node: band, f, ox: 0, oy: horizonY - bh + 4, camX0: 0, camY0: cam0 });
       }
+    }
 
-      // clouds: a few soft puffs drifting across the sky band
-      if (sky.clouds > 0) {
-        const puff = canvasTexture(48, 18, (ctx) => {
-          ctx.fillStyle = '#ffffff';
-          for (const [cx, cy, r] of [
-            [14, 12, 7],
-            [24, 9, 9],
-            [35, 12, 6],
-            [20, 13, 6],
-          ] as [number, number, number][]) {
-            ctx.beginPath();
-            ctx.arc(cx, cy, r, 0, Math.PI * 2);
-            ctx.fill();
-          }
-          ctx.fillRect(8, 12, 32, 5);
-        });
-        // clouds ride a 0.35 parallax layer; their x drifts and wraps across that layer's span
-        const cf = 0.35;
-        this.cloudSpan = vw + worldW * cf + 160;
-        for (let i = 0; i < sky.clouds; i++) {
-          const s = new Sprite(puff);
-          s.tint = sky.cloudColor;
-          s.alpha = 0.55 + Math.random() * 0.3;
-          const sc = 1.4 + Math.random() * 2;
-          s.scale.set(sc);
-          this.container.addChild(s);
-          const fy = 0.02 + Math.random() * 0.4;
-          const layer: Parallax = { node: s, f: cf, ox: Math.random() * this.cloudSpan - 80, oy: cam0 + fy * vh, camX0: 0, camY0: cam0, fy };
-          this.layers.push(layer);
-          this.clouds.push({ s, speed: (4 + Math.random() * 6) / sc, layer });
-        }
+    if (!this.sky) {
+      // cave maps: the sky still shows behind the back wall (Blastronaut), glued to the screen
+      const grad = canvasTexture(
+        4,
+        96,
+        (ctx) => {
+          const g = ctx.createLinearGradient(0, 0, 0, 96);
+          g.addColorStop(0, hex(bd.top));
+          g.addColorStop(1, hex(bd.bottom));
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, 4, 96);
+        },
+        false,
+      );
+      this.skySprite = new Sprite(grad);
+      this.screen.addChildAt(this.skySprite, 0);
+    }
+    // three banks of pixel clouds, far → near: paler and smaller at the back, bigger at the front
+    {
+      const rng = mulberry(seed ^ 0x1f3c9d27);
+      const [body, light, shade] = bd.cloud;
+      const banks: { scale: number; n: number; mixTo: number; w: number; h: number }[] = [
+        { scale: 0.7, n: 14, mixTo: 0.45, w: 640, h: 300 },
+        { scale: 1, n: 10, mixTo: 0.2, w: 800, h: 360 },
+        { scale: 1.4, n: 6, mixTo: 0, w: 1000, h: 420 },
+      ];
+      for (const b of banks) {
+        // far banks fade toward the sky colour
+        const tint = (c: number) => Number('0x' + mixHex(c, bd.bottom, b.mixTo));
+        const cvs = cloudBank(b.w, b.h, rng, [tint(body), tint(light), tint(shade)], b.n, b.scale);
+        const tex = Texture.from(cvs);
+        tex.source.scaleMode = 'nearest';
+        const ts = new TilingSprite({ texture: tex, width: vw + 4, height: vh + 4 });
+        this.screen.addChild(ts);
+        const x = Math.floor(rng() * b.w);
+        ts.tilePosition.set(x, 0);
+        this.cloudBanks.push({ s: ts, x });
       }
     }
 
     // Far rock: a different-seed version of the same map style, drawn once into one texture, at half speed.
-    const far = generateTerrain(seed ^ 0x5bd1e995, MAP_W, MAP_H, map?.terrain).grid;
+    // cave maps use a sparser, open cave for the wall so plenty of sky shows through (dense maps like Furnace would hide it)
+    const farStyle = map && !this.sky ? { ...map.terrain, layout: 'caves' as const, fillChance: Math.min(map.terrain.fillChance, 0.47) } : map?.terrain;
+    const far = generateTerrain(seed ^ 0x5bd1e995, MAP_W, MAP_H, farStyle).grid;
     const cvs = document.createElement('canvas');
     cvs.width = far.w * T;
     cvs.height = far.h * T;
     const ctx = cvs.getContext('2d')!;
-    const farHex = hex(p.farRock);
-    const edgeHex = '#' + mixHex(p.farRock, this.sky ? this.sky.bottom : p.rockDark, 0.35);
+    // the back wall: a dark silhouette of rock blocks (sky and clouds show through its gaps)
+    const farHex = hex(bd.wall);
+    const edgeHex = '#' + mixHex(bd.wall, bd.bottom, 0.3);
+    const seamHex = '#' + mixHex(bd.wall, 0x000000, 0.35);
+    const rngWall = mulberry(seed ^ 0x3c6ef372);
     for (let y = 0; y < far.h; y++) {
       for (let x = 0; x < far.w; x++) {
         if (!far.tiles[far.idx(x, y)]) continue;
         ctx.fillStyle = farHex;
         ctx.fillRect(x * T, y * T, T, T);
+        // block seams so the wall reads as stacked stones, not a flat fill
+        ctx.fillStyle = seamHex;
+        ctx.fillRect(x * T, y * T + T - 1, T, 1);
+        if ((x + y) % 2 === 0) ctx.fillRect(x * T + (rngWall() < 0.5 ? 5 : 10), y * T, 1, T);
         if (!far.isSolid(x, y - 1)) {
           ctx.fillStyle = edgeHex;
-          ctx.fillRect(x * T, y * T, T, 1);
-        }
-      }
-    }
-    if (!this.sky) {
-      // The cave is inside a structure: lit window openings and worn wall panels show through
-      // wherever the rock is carved away. Baked into the same far canvas (parallax 0.5), so it costs nothing per frame.
-      const rng = mulberry(seed ^ 0x9e3779b9);
-      const pane = '#' + mixHex(p.fringe, 0xffffff, 0.55);
-      const paneDim = '#' + mixHex(p.fringe, p.farRock, 0.55);
-      const frame = '#' + mixHex(p.rockDark, 0x000000, 0.4);
-      const count = 120;
-      for (let k = 0; k < count; k++) {
-        const wdt = 56 + Math.floor(rng() * 80);
-        const hgt = 40 + Math.floor(rng() * 56);
-        const x = 40 + Math.floor(rng() * (cvs.width - wdt - 80));
-        const y = 40 + Math.floor(rng() * (cvs.height - hgt - 80));
-        this.windows.push({ x: x + wdt / 2, y: y + hgt / 2, r: Math.max(wdt, hgt) * 1.1 });
-        // soft light spill around the opening
-        const spill = ctx.createRadialGradient(x + wdt / 2, y + hgt / 2, Math.min(wdt, hgt) * 0.3, x + wdt / 2, y + hgt / 2, Math.max(wdt, hgt) * 0.9);
-        spill.addColorStop(0, 'rgba(255,255,255,0.10)');
-        spill.addColorStop(1, 'rgba(255,255,255,0)');
-        ctx.fillStyle = spill;
-        ctx.fillRect(x - wdt * 0.6, y - hgt * 0.6, wdt * 2.2, hgt * 2.2);
-        // frame + glass
-        ctx.fillStyle = frame;
-        ctx.fillRect(x - 3, y - 3, wdt + 6, hgt + 6);
-        ctx.fillStyle = paneDim;
-        ctx.fillRect(x, y, wdt, hgt);
-        ctx.fillStyle = pane;
-        ctx.fillRect(x + 2, y + 2, wdt - 4, hgt - 4);
-        // mullions: 2x2 or 3x2 panes
-        const cols = wdt > 80 ? 3 : 2;
-        ctx.fillStyle = frame;
-        for (let c = 1; c < cols; c++) ctx.fillRect(x + Math.floor((wdt * c) / cols) - 1, y, 3, hgt);
-        ctx.fillRect(x, y + Math.floor(hgt / 2) - 1, wdt, 3);
-        // a brighter streak: something outside is lit
-        ctx.fillStyle = 'rgba(255,255,255,0.28)';
-        ctx.fillRect(x + 4, y + 4, Math.floor(wdt * 0.35), Math.floor(hgt * 0.4));
-        // riveted wall panel below the sill
-        ctx.fillStyle = '#' + mixHex(p.farRock, p.rockMid, 0.5);
-        ctx.fillRect(x - 6, y + hgt + 3, wdt + 12, 6);
-        ctx.fillStyle = frame;
-        for (let rx = x - 4; rx < x + wdt + 6; rx += 8) ctx.fillRect(rx, y + hgt + 5, 2, 2);
-      }
-      // occasional horizontal girders spanning the far wall
-      ctx.fillStyle = '#' + mixHex(p.farRock, p.rockDark, 0.6);
-      for (let k = 0; k < 6; k++) {
-        const gy = 60 + Math.floor(rng() * (cvs.height - 120));
-        const gx = Math.floor(rng() * cvs.width * 0.5);
-        const gw = 300 + Math.floor(rng() * 500);
-        ctx.fillRect(gx, gy, gw, 4);
-        ctx.fillStyle = frame;
-        for (let rx = gx; rx < gx + gw; rx += 24) ctx.fillRect(rx, gy + 1, 2, 2);
-        ctx.fillStyle = '#' + mixHex(p.farRock, p.rockDark, 0.6);
-      }
-      // re-draw the far rock on top so windows only show through gaps
-      for (let y = 0; y < far.h; y++) {
-        for (let x = 0; x < far.w; x++) {
-          if (!far.tiles[far.idx(x, y)]) continue;
-          ctx.fillStyle = farHex;
-          ctx.fillRect(x * T, y * T, T, T);
-          if (!far.isSolid(x, y - 1)) {
-            ctx.fillStyle = edgeHex;
-            ctx.fillRect(x * T, y * T, T, 1);
-          }
+          ctx.fillRect(x * T, y * T, T, 2);
         }
       }
     }
     const farTex = Texture.from(cvs);
     farTex.source.scaleMode = 'nearest';
     this.far = new Sprite(farTex);
-    if (this.sky) this.far.alpha = 0.75;
     this.container.addChild(this.far);
-
-    // motes: cave dust, snow, or wind-blown sand
-    const count = this.motes === 'cave' ? 40 : 70;
-    for (let i = 0; i < count; i++) {
-      const d = new Sprite(atlas.white);
-      d.width = d.height = Math.random() < 0.7 ? 1 : 2;
-      d.alpha = this.motes === 'snow' ? 0.6 + Math.random() * 0.4 : 0.15 + Math.random() * 0.25;
-      d.tint = this.motes === 'snow' ? 0xffffff : p.fringe;
-      d.x = Math.random() * worldW;
-      d.y = Math.random() * worldH;
-      this.container.addChild(d);
-      this.dust.push(d);
-    }
 
     // Vignette: cheap radial gradient rectangle in screen space (lighter on open-air maps)
     this.vignette = new Graphics();
@@ -354,10 +333,9 @@ export class Background {
   }
 
   resize(vw: number, vh: number): void {
-    this.vh = vh;
     const g = this.vignette;
     g.clear();
-    const bands = this.sky ? 0 : 6; // no vignette over a bright sky (the stroked rings would show)
+    const bands = 0; // every map has a bright sky behind it now: no vignette rings
     for (let i = 0; i < bands; i++) {
       const inset = (i / bands) * Math.min(vw, vh) * 0.35;
       g.rect(inset, inset, vw - inset * 2, vh - inset * 2).stroke({
@@ -366,17 +344,29 @@ export class Background {
         alpha: this.sky ? 0.05 : 0.12,
       });
     }
+  }
+
+  /** zoomed out: sample the back wall smoothly so it doesn't crawl */
+  setSmooth(on: boolean): void {
+    this.far.texture.source.scaleMode = on ? 'linear' : 'nearest';
+  }
+
+  /** debug: where the fixed backdrop is (must never change while playing) */
+  get debug(): { screen: number[]; clouds: number[][] } {
+    return { screen: [this.screen.x, this.screen.y], clouds: this.cloudBanks.map((b) => [b.s.x, b.s.y, b.s.tilePosition.x, b.s.tilePosition.y]) };
+  }
+
+  /** size the fixed screen backdrop to the screen (virtual px, independent of scope zoom) */
+  resizeScreen(sw: number, sh: number): void {
     if (this.skySprite) {
-      this.skySprite.width = vw + 4;
-      this.skySprite.height = vh * 1.6;
+      this.skySprite.width = sw;
+      this.skySprite.height = sh;
     }
-    // re-anchor screen-relative sky layers (sun, clouds, horizon) to the new view size
-    const cam0 = this.horizonY - vh * 0.55;
-    for (const l of this.layers) {
-      if (l.fx !== undefined) l.ox = l.fx * vw;
-      if (l.fy !== undefined) l.oy = cam0 + l.fy * vh;
-      if (l.f !== 0.08) l.camY0 = cam0; // stars keep the world anchor
+    for (const b of this.cloudBanks) {
+      b.s.width = sw;
+      b.s.height = sh;
     }
+    if (this.sun) this.sun.position.set(Math.round(this.sunAt.x * sw), Math.round(this.sunAt.y * sh));
   }
 
   /** window glows for the light layer, in view px (parallax 0.5 like the far layer); at most `max` nearest the view */
@@ -393,44 +383,5 @@ export class Background {
       if (out.length >= max) break;
     }
     return out;
-  }
-
-  update(camera: Camera, dt: number): void {
-    const T = TILE_SIZE;
-    const worldH = MAP_H * T;
-    // parallax: far layer moves at half camera speed
-    this.far.x = camera.left * 0.5;
-    this.far.y = camera.top * 0.5;
-    if (this.skySprite) {
-      // glued to the screen; slides up a little as the camera climbs so the top darkens
-      this.skySprite.x = camera.left - 2;
-      this.skySprite.y = camera.top - this.vh * 0.6 * (1 - camera.top / Math.max(1, worldH - this.vh));
-    }
-    for (const c of this.clouds) {
-      c.layer.ox += c.speed * dt;
-      if (c.layer.ox > this.cloudSpan) c.layer.ox = -c.s.width - 20;
-    }
-    for (const l of this.layers) {
-      l.node.x = l.ox + (camera.left - l.camX0) * (1 - l.f);
-      l.node.y = l.oy + (camera.top - l.camY0) * (1 - l.f);
-    }
-    const t = performance.now() / 1000;
-    const worldW = MAP_W * T;
-    for (let i = 0; i < this.dust.length; i++) {
-      const d = this.dust[i];
-      if (this.motes === 'snow') {
-        d.y += dt * (14 + (i % 4) * 5);
-        d.x += Math.sin(t * 0.8 + i) * dt * 6;
-        if (d.y > worldH) d.y = 0;
-      } else if (this.motes === 'dust') {
-        d.x += dt * (18 + (i % 5) * 6);
-        d.y += Math.sin(t + i) * dt * 3;
-        if (d.x > worldW) d.x = 0;
-      } else {
-        d.y -= dt * (2 + (i % 3));
-        d.x += Math.sin(t + i) * dt * 2;
-        if (d.y < 0) d.y = worldH;
-      }
-    }
   }
 }

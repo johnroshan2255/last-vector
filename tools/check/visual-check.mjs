@@ -170,11 +170,18 @@ async function runMultiplayer(browser, baseUrl, wsUrl) {
   check('A is credited with the kill', sAk.kills >= 1, `kills=${sAk.kills}`);
   const feed = await A.page.locator('[data-hud=feed]').innerText().catch(() => '');
   check('kill feed shows the kill', /ALPHA/.test(feed) || /YOU/.test(feed), `feed="${feed}"`);
+  {
+    const a = (await stats(A)).sfx;
+    const b = (await stats(B)).sfx;
+    check('B hears their own death yell; A hears B\'s yell + the kill chime (Mini Militia style)', (b.death ?? 0) >= 1 && (a.deathOther ?? 0) >= 1 && (a.kill ?? 0) >= 1, JSON.stringify({ A: { deathOther: a.deathOther, kill: a.kill }, B: { death: b.death } }));
+    check('B hears every hit land, and hears A\'s blaster (remote gunfire is audible)', (b.hurt ?? 0) >= 1 && (b.shot ?? 0) >= 1, JSON.stringify({ hurt: b.hurt, shot: b.shot }));
+  }
   await B.page.screenshot({ path: join(OUT, `mp-B-${BIOME}-killed.png`) });
   await A.page.screenshot({ path: join(OUT, `mp-A-${BIOME}-kill.png`) });
   const respawned = await B.page.waitForFunction(() => globalThis.__LV.stats().player?.alive === true, null, { timeout: 7000 }).then(() => true, () => false);
   const sBr = await stats(B);
   check('B respawns with full health after ~3 s', respawned && sBr.player.health === 100 && sBr.player.grounded !== undefined, `alive=${sBr.player?.alive} hp=${sBr.player?.health}`);
+  check('A hears B respawn', ((await stats(A)).sfx.respawn ?? 0) >= 1, JSON.stringify((await stats(A)).sfx.respawn));
   check('respawn overlay gone', (await B.page.evaluate(() => globalThis.__LV.death())) === null && !(await B.page.locator('[data-hud=death]').isVisible()));
   check('B\'s deaths counted in the roster', (await stats(A)).net.roster.find((r) => r.id === sB2.net.localId)?.deaths === 1, JSON.stringify((await stats(A)).net.roster));
 
@@ -313,6 +320,13 @@ async function runMultiplayer(browser, baseUrl, wsUrl) {
   await A.page.screenshot({ path: join(OUT, `mp-A-${BIOME}-debug.png`) });
   await A.page.evaluate(() => globalThis.__LV.setLag(0));
 
+  // terrain materials stay in sync: both clients replay the server's tile ops (carving, cracks, falling sand)
+  await A.page.waitForTimeout(500);
+  {
+    const a = await stats(A);
+    const b = await stats(B);
+    check('both pilots see the same cave (rock, hard stone, sand) after all the digging', a.solidTiles === b.solidTiles && a.hardTiles === b.hardTiles && a.sandTiles === b.sandTiles && a.hardTiles > 0 && a.sandTiles > 0, JSON.stringify({ A: [a.solidTiles, a.hardTiles, a.sandTiles], B: [b.solidTiles, b.hardTiles, b.sandTiles] }));
+  }
   // guest B leaves: nothing happens to the host, B just vanishes from A's world
   await B.page.evaluate(() => globalThis.__LV.toMenu());
   await A.page.waitForFunction(() => globalThis.__LV.stats().players === 1, null, { timeout: 8000 }).catch(() => {});
@@ -504,6 +518,11 @@ async function runScenario(browser, sc, baseUrl) {
   await page.click('[data-tab=weapons]');
   check('settings → WEAPONS lists all 11 weapons', (await page.locator('[data-tab-body=weapons] .arsenal-item').count()) === 11, `items=${await page.locator('[data-tab-body=weapons] .arsenal-item').count()}`);
   check('weapon icons in the WEAPONS tab', (await page.locator('[data-tab-body=weapons] .arsenal-icon').count()) === 11, `icons=${await page.locator('[data-tab-body=weapons] .arsenal-icon').count()}`);
+  {
+    const unlocks = await page.locator('[data-tab-body=weapons] .arsenal-unlock').allInnerTexts();
+    const maps = await page.locator('[data-tab-body=weapons] .arsenal-maps').allInnerTexts();
+    check('every drop weapon is available in every wave and on every map', unlocks.filter((t) => /ALL WAVES/.test(t)).length === 9 && unlocks.filter((t) => /START KIT/.test(t)).length === 2 && maps.every((t) => /ALL MAPS/.test(t)), `${unlocks.join('|')} / ${maps.join('|')}`);
+  }
   await shot('1b-settings-weapons');
   await page.click('[data-tab=bombs]');
   check('settings → BOMBS lists all 6 bombs with icons', (await page.locator('[data-tab-body=bombs] .arsenal-item').count()) === 6 && (await page.locator('[data-tab-body=bombs] .arsenal-icon').count()) === 6, `items=${await page.locator('[data-tab-body=bombs] .arsenal-item').count()}`);
@@ -562,26 +581,92 @@ async function runScenario(browser, sc, baseUrl) {
   check('lands again', s2.player.grounded, `vel.y=${s2.player.vel.y.toFixed(2)}`);
   check('fuel regenerates on ground', s2.player.fuel > s1.player.fuel + 5, `fuel ${s1.player.fuel.toFixed(0)} -> ${s2.player.fuel.toFixed(0)}`);
 
+  // the Blastronaut sky + clouds stay put on screen while the camera moves (no drift, no parallax jitter)
+  {
+    const b0 = await stats();
+    await setInput({ ...idle, moveX: 1, jet: true });
+    await page.waitForTimeout(700);
+    await setInput({ ...idle });
+    await page.waitForTimeout(300);
+    const b1 = await stats();
+    const moved = b0.camera[0] !== b1.camera[0] || b0.camera[1] !== b1.camera[1];
+    check('sky and clouds do not move while the camera does', moved && b0.backdrop.clouds.length === 3 && JSON.stringify(b0.backdrop) === JSON.stringify(b1.backdrop), `camera ${b0.camera} -> ${b1.camera} backdrop ${JSON.stringify(b0.backdrop)} -> ${JSON.stringify(b1.backdrop)}`);
+    await lv(() => globalThis.__LV.teleportSpawn());
+    await page.waitForTimeout(700);
+  }
   // ================= Step 4 + weapons roster (9 weapons, 2 slots, given via debug like a supply drop)
   await lv(() => globalThis.__LV.setDrops(false));
   const WEAPONS = ['blaster', 'vector', 'scatter', 'vulcan', 'plasma', 'flamer', 'sniper', 'arc', 'rail', 'launcher', 'emp'];
-  const DIGS = { flamer: false, plasma: false, emp: false }; // flamer burns rock instead (checked below); plasma blasts are tiny; emp doesn't dig
+  const DIGS = { flamer: false, plasma: false, emp: false };
+  // every gun has its own voice
+  const WEAPON_SFX = { blaster: 'shot', vector: 'beamOn', scatter: 'shotgun', vulcan: 'vulcan', plasma: 'plasma', flamer: 'flame', sniper: 'sniper', arc: 'arc', rail: 'rail', launcher: 'rocket', emp: 'empShot' };
+  check('all 11 guns have different sounds', new Set(Object.values(WEAPON_SFX)).size === 11);
+  const gunSizes = {}; // flamer burns rock instead (checked below); plasma blasts are tiny; emp doesn't dig
   for (const w of WEAPONS) {
+    const sfxBefore = (await stats()).sfx;
     await lv(() => globalThis.__LV.resetHeat());
     const slot = await lv((w) => globalThis.__LV.giveWeapon(w), w);
     await setInput({ ...idle, weapon: slot, aimAngle: -Math.PI * 0.08 });
     await page.waitForTimeout(150);
     const before = await stats();
     check(`weapon ${w} in slot ${slot}`, before.weapon.id === w, `got ${before.weapon.id} slots=${JSON.stringify(before.weapon.slots)}`);
+    // the drawn gun: its own size, and its barrel tip is exactly where the sim fires from
+    gunSizes[w] = before.gun ? [before.gun.w, before.gun.h] : null;
+    const tipErr = before.gun && before.muzzle ? Math.hypot(before.gun.tip.x - before.muzzle.x, before.gun.tip.y - before.muzzle.y) : 99;
+    check(`weapon ${w}: rounds leave from the drawn barrel tip`, tipErr < 0.12, `tip=${JSON.stringify(before.gun?.tip)} muzzle=${JSON.stringify(before.muzzle)} err=${tipErr.toFixed(3)} units`);
     await setInput({ ...idle, weapon: slot, fire: true, aimAngle: -Math.PI * 0.08 });
-    await page.waitForTimeout(w === 'launcher' || w === 'rail' ? 900 : 650);
-    if (['vector', 'scatter', 'arc', 'launcher', 'flamer', 'rail'].includes(w)) await shot(`3-weapon-${w}`);
+    // sample the effect layers while the trigger is held: every gun must draw its own FX
+    let fxPeak = { pixelFx: 0, bolts: 0, tracers: 0, particles: 0 };
+    const until = Date.now() + (w === 'launcher' || w === 'rail' || w === 'emp' ? 900 : 650);
+    let shotTaken = false;
+    while (Date.now() < until) {
+      const f = await stats();
+      fxPeak = { pixelFx: Math.max(fxPeak.pixelFx, f.pixelFx), bolts: Math.max(fxPeak.bolts, f.bolts), tracers: Math.max(fxPeak.tracers, f.tracers), particles: Math.max(fxPeak.particles, f.particles) };
+      if (!shotTaken && Date.now() > until - 420) {
+        await shot(`3-weapon-${w}`);
+        shotTaken = true;
+      }
+      await page.waitForTimeout(40);
+    }
+    {
+      const snd = WEAPON_SFX[w];
+      const after = (await stats()).sfx;
+      check(`weapon ${w} plays its own sound (${snd})`, (after[snd] ?? 0) > (sfxBefore[snd] ?? 0), `${snd}: ${sfxBefore[snd] ?? 0} -> ${after[snd] ?? 0}`);
+    }
+    if (w === 'vector') check(`weapon ${w} draws its beam`, (await stats()).weapon.beamFiring || fxPeak.particles > 0, JSON.stringify(fxPeak));
+    else if (w === 'arc') check(`weapon ${w} draws thunder bolts`, fxPeak.bolts > 0 && fxPeak.pixelFx > 0, JSON.stringify(fxPeak));
+    else check(`weapon ${w} draws its pixel FX (flash / smoke / blast)`, fxPeak.pixelFx > 0, JSON.stringify(fxPeak));
+    if (['blaster', 'scatter', 'vulcan', 'plasma', 'launcher', 'emp'].includes(w)) check(`weapon ${w} rounds are visible in flight`, fxPeak.tracers > 0, JSON.stringify(fxPeak));
     fpsLog[`w-${w}`] = await sampleFps(500);
     const after = await stats();
     if (DIGS[w] !== false) check(`weapon ${w} carves rock`, after.tilesDestroyed > before.tilesDestroyed, `+${after.tilesDestroyed - before.tilesDestroyed} tiles`);
     check(`weapon ${w} builds heat`, after.weapon.heat > 3, `heat=${after.weapon.heat.toFixed(0)}`);
     await setInput({ ...idle, weapon: slot, aimAngle: -Math.PI * 0.08 });
     await page.waitForTimeout(150);
+  }
+  {
+    const sizes = Object.values(gunSizes).map((s) => (s ? s.join('x') : 'none'));
+    const area = (w) => (gunSizes[w] ? gunSizes[w][0] * gunSizes[w][1] : 0);
+    check('every gun is drawn at its own size', new Set(sizes).size === WEAPONS.length && !sizes.includes('none'), JSON.stringify(gunSizes));
+    check('the launcher is the biggest gun', WEAPONS.every((w) => w === 'launcher' || area('launcher') > area(w)), JSON.stringify(gunSizes));
+  }
+  // your own blast hurts you: a rocket into the floor at your feet
+  {
+    await lv(() => globalThis.__LV.teleportSpawn());
+    await page.waitForTimeout(800);
+    await lv(() => globalThis.__LV.heal());
+    await lv(() => globalThis.__LV.resetHeat());
+    const ls = await lv(() => globalThis.__LV.giveWeapon('launcher'));
+    await setInput({ ...idle, weapon: ls, aimAngle: Math.PI / 2 });
+    await page.waitForTimeout(250);
+    const hp0 = (await stats()).player.health;
+    await setInput({ ...idle, weapon: ls, fire: true, aimAngle: Math.PI / 2 });
+    await page.waitForTimeout(260);
+    await setInput({ ...idle, weapon: ls, aimAngle: Math.PI / 2 });
+    await page.waitForTimeout(500);
+    const hp1 = (await stats()).player.health;
+    check('a point-blank rocket hurts the one who fired it', hp0 - hp1 >= 20, `hp ${hp0} -> ${hp1}`);
+    await lv(() => globalThis.__LV.heal());
   }
   // flamer: rock catches fire, then crumbles (from the spawn floor, flaming straight down at the ground under our feet)
   await lv(() => globalThis.__LV.teleportSpawn());
@@ -598,6 +683,25 @@ async function runScenario(browser, sc, baseUrl) {
   const fa = await stats();
   check('flamer sets rock alight (tiles burning)', fmid.burningTiles > 0, `burning=${fmid.burningTiles}`);
   check('burning rock crumbles after the burn', fa.tilesDestroyed > fb.tilesDestroyed && fa.burningTiles === 0, `+${fa.tilesDestroyed - fb.tilesDestroyed} tiles, still burning=${fa.burningTiles}`);
+  // terrain materials (Blastronaut): hard stone takes several hits, sand breaks in one and never falls
+  {
+    const m0 = await stats();
+    check('the cave has hard stone and sand', m0.hardTiles > 40 && m0.sandTiles > 40, `hard=${m0.hardTiles} sand=${m0.sandTiles}`);
+    const hit = await lv(() => globalThis.__LV.hitHardStone(2));
+    check('a bullet only chips hard stone (it holds, with fewer hp)', hit && hit.material === 3 && hit.hp === 10, JSON.stringify(hit));
+    await page.waitForTimeout(120);
+    check('chipping stone plays the stone clink', ((await stats()).sfx.chip ?? 0) > (m0.sfx.chip ?? 0), `chip=${(await stats()).sfx.chip}`);
+    let hp = hit?.hp ?? 0;
+    for (let k = 0; k < 5 && hp > 0; k++) hp = (await lv(() => globalThis.__LV.hitHardStone(2)))?.hp ?? 0;
+    check('…and breaks after 6 bullet hits', hp === 0, `hp=${hp}`);
+    const sand = await lv(() => globalThis.__LV.undermineSand());
+    await page.waitForTimeout(1200);
+    await shot('3c-sand-stays');
+    const still = sand ? await lv((p) => globalThis.__LV.tileAt(p.x, p.y), sand) : -1;
+    check('sand stays put when the rock under it is dug out (no falling)', !!sand && still === 4, `sand=${JSON.stringify(sand)} tile now=${still}`);
+    await lv(() => globalThis.__LV.teleportSpawn());
+    await page.waitForTimeout(700);
+  }
   // slot swap: 1 and 2 hold different weapons; switching changes the active weapon
   const sw0 = await stats();
   await setInput({ ...idle, weapon: 0, aimAngle: 0 });
@@ -615,7 +719,10 @@ async function runScenario(browser, sc, baseUrl) {
   await page.waitForTimeout(700);
   const sc2 = await stats();
   check('heat cools when released', sc2.weapon.heat < so.weapon.heat - 10, `heat ${so.weapon.heat.toFixed(0)} -> ${sc2.weapon.heat.toFixed(0)}`);
-  // back on the spawn floor for the bomb section (the weapon sweep may have carved the ground away)
+  // back on the spawn floor for the bomb section (the weapon sweep may have carved the ground away).
+  // This section checks what each bomb *does* (craters, fire, smoke, clusters) with charges going off
+  // right next to the pilot; self-damage has its own checks, so the pilot is invulnerable here.
+  await lv(() => globalThis.__LV.setGod(true));
   await lv(() => globalThis.__LV.teleportSpawn());
   await page.waitForTimeout(900);
   check('teleported to spawn and landed', (await stats()).player.grounded, `y=${(await stats()).player.y.toFixed(1)}`);
@@ -715,6 +822,7 @@ async function runScenario(browser, sc, baseUrl) {
   check('HUD shows a counter for each of the 6 bomb types once unlocked', bombDots === 6 && (await visible('[data-hud=bombs] .hud-bomb-icon')), `dots=${bombDots}`);
   await setInput({ ...idle, weapon: 0, bombType: 0, aimAngle: 0 });
   await page.waitForTimeout(400);
+  await lv(() => globalThis.__LV.setGod(false));
   const healed = await lv(() => globalThis.__LV.heal());
   check('bomb tests left the player alive (healed for the next section)', healed === 100 && (await stats()).phase === 'playing', `hp=${healed}`);
   // regrow: carve a hole into rock away from the player, it heals within ~5 s
@@ -739,13 +847,28 @@ async function runScenario(browser, sc, baseUrl) {
   check('HUD weapon slots show weapon icons', (await page.locator('[data-hud=weapons] .hud-slot-icon').count()) >= 1);
   await shot('4c-crate');
   await page.waitForFunction(() => globalThis.__LV.stats().dropList.every((d) => d.landed), null, { timeout: 12000 }).catch(() => {});
-  await page.waitForTimeout(300);
+  // walk over to the weapon crate (where it lands depends on the terrain around the pilot)
+  {
+    const rail = (await stats()).dropList.find((d) => d.weapon === 'rail');
+    if (rail) await lv((d) => globalThis.__LV.teleportTo(d.x, d.y - 0.3), rail);
+  }
+  await page.waitForTimeout(400);
   const dpL = await stats();
+  {
+    const box = await page.locator('[data-action=take]').boundingBox().catch(() => null);
+    const vp = page.viewportSize();
+    const bg = await page.locator('[data-action=take]').evaluate((el) => getComputedStyle(el).backgroundColor).catch(() => '');
+    check('the TAKE button is small and round (Mini Militia), not a big orange card', !!box && !!vp && box.width <= Math.max(72, vp.width * 0.08) && Math.abs(box.width - box.height) < 4 && !/255, 184, 79/.test(bg), `box=${JSON.stringify(box)} vp=${vp?.width}x${vp?.height} bg=${bg}`);
+  }
   check('landed crates are NOT auto-collected; a TAKE button appears', dpL.drops === dp0.drops + 2 && !dpL.weapon.slots.includes('rail') && !!dpL.player.nearDrop && (await visible('[data-action=take]')), `drops=${dpL.drops} near=${JSON.stringify(dpL.player.nearDrop)}`);
   await shot('4c2-take-button');
-  // take both (nearest first, then the other one becomes reachable)
-  for (let i = 0; i < 2; i++) {
-    await page.click('[data-action=take]');
+  // take both: walk to each crate in turn (they can land a few tiles apart), then tap TAKE
+  for (const pick of [(d) => d.weapon === 'rail', (d) => d.bomb === 'gel']) {
+    const d = (await stats()).dropList.find(pick);
+    if (!d) continue;
+    await lv((d) => globalThis.__LV.teleportTo(d.x, d.y - 0.3), d);
+    const shown = await page.waitForSelector('[data-action=take]', { state: 'visible', timeout: 3000 }).then(() => true, () => false);
+    if (shown) await page.click('[data-action=take]', { timeout: 3000 }).catch(() => {});
     await page.waitForTimeout(250);
   }
   const dp2 = await stats();
@@ -846,6 +969,32 @@ async function runScenario(browser, sc, baseUrl) {
   check('sniper scope is 7x = 2.5× view', zs.scopeLevel === 7 && Math.abs(zs.cameraView.vw - z0.cameraView.vw * 2.5) < z0.cameraView.vw * 0.01 && zs.weapon.id === 'sniper', `level=${zs.scopeLevel} view=${zs.cameraView.vw} (1x=${z0.cameraView.vw})`);
   await shot('5c-sniper-7x');
   fpsLog.sniper7x = await sampleFps(900);
+  // smooth motion zoomed all the way out: every frame is on the even path (no hitch), and the
+  // cave is cheap to draw (chunks are cached, not thousands of tile sprites)
+  {
+    const sl = (await stats()).weapon.active;
+    await lv(() => globalThis.__LV.traceStart());
+    await setInput({ ...idle, weapon: sl, moveX: 1, jet: true });
+    await page.waitForTimeout(900);
+    await setInput({ ...idle, weapon: sl, moveX: -1 });
+    await page.waitForTimeout(700);
+    await setInput({ ...idle, weapon: sl });
+    const tr = await lv(() => globalThis.__LV.traceStop());
+    let hitches = 0;
+    // compare each frame with the straight line between its neighbours *in time* (frames can land late)
+    for (let i = 1; i + 1 < tr.length; i++) {
+      const k = (tr[i].t - tr[i - 1].t) / Math.max(1e-6, tr[i + 1].t - tr[i - 1].t);
+      const ex = tr[i].wx - (tr[i - 1].wx + (tr[i + 1].wx - tr[i - 1].wx) * k);
+      const ey = tr[i].wy - (tr[i - 1].wy + (tr[i + 1].wy - tr[i - 1].wy) * k);
+      if (Math.max(Math.abs(ex), Math.abs(ey)) > 1.01) hitches++;
+    }
+    const ms = tr.map((f) => f.ms).sort((x, y) => x - y);
+    const med = ms[Math.floor(ms.length / 2)] ?? 0;
+    const moved = tr.length > 2 && (tr[0].wx !== tr[tr.length - 1].wx || tr[0].wy !== tr[tr.length - 1].wy);
+    check('flying at 7x zoom-out is smooth (no hitches) and cheap to draw', moved && hitches === 0 && med < 6, `frames=${tr.length} hitches=${hitches} render median=${med.toFixed(2)} ms`);
+    await lv(() => globalThis.__LV.teleportSpawn());
+    await page.waitForTimeout(500);
+  }
   await lv(() => globalThis.__LV.giveWeapon('blaster'));
   await page.waitForTimeout(700);
   const zb = await stats();

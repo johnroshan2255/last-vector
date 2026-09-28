@@ -3,7 +3,7 @@ import { useGameStore } from '../store/gameStore';
 import { isIPhone, isStandalone } from '../platform/fullscreen';
 import { BIOMES, GAME_NAME, MAX_PLAYERS_PER_ROOM, ROOM_CODE_LENGTH } from '@shared/constants';
 import { MAPS, MAP_ORDER, type MapId } from '@shared/maps';
-import { BOMBS, WEAPONS } from '@shared/weapons';
+import { BOMBS } from '@shared/weapons';
 import { Cog } from './Cog';
 
 interface Props {
@@ -125,7 +125,7 @@ export function StartScreen({ onPlay, onHost, onJoin, onQuick }: Props) {
                 <button
                   key={id}
                   className={`map-card ${on ? 'on' : ''}`}
-                  style={{ '--c': hx(pal.fringe), '--rock': hx(pal.rockMid), '--tint': hx(pal.tint), '--sky1': hx(m.sky?.top ?? 0x05060a), '--sky2': hx(m.sky?.bottom ?? 0x0d1220) } as React.CSSProperties}
+                  style={{ '--c': hx(pal.fringe), '--rock': hx(pal.rockMid), '--tint': hx(pal.tint), '--sky1': hx(m.backdrop.top), '--sky2': hx(m.backdrop.bottom) } as React.CSSProperties}
                   data-map={id}
                   onClick={() => setSettings({ map: id })}
                   title={m.tagline}
@@ -134,7 +134,7 @@ export function StartScreen({ onPlay, onHost, onJoin, onQuick }: Props) {
                   <span className="map-name">{m.name}</span>
                   <span className="map-tag">{m.tagline.split('.')[0]}</span>
                   <span className="map-kit">
-                    {m.weapons.map((w) => WEAPONS[w].name.split(' ')[0]).join(' · ')}
+                    ALL WEAPONS
                     <br />
                     {m.bombs.map((b) => BOMBS[b].name).join(' · ')}
                   </span>

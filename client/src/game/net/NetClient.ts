@@ -1,7 +1,7 @@
 import { Client, type Room } from 'colyseus.js';
 import type RAPIER from '@dimforge/rapier2d-compat';
 import { FIXED_DT, NET, ROOM_NAME, type BiomeId } from '@shared/constants';
-import { ClientMessage, ServerMessage, type JoinOptions, type PlayerInput, type RoomLookup, type WelcomeMessage } from '@shared/types';
+import { ClientMessage, ServerMessage, type JoinOptions, type PlayerInput, type RoomLookup, type TilesMessage, type WelcomeMessage } from '@shared/types';
 import type { AlienSnap, BombSnap, CloudSnap, DropSnap, PickupSnap, PlayerSnap, SimEvent, Snapshot, WaveSnap } from '@shared/sim/events';
 import { Match } from '@shared/sim/match';
 import type { TileGrid } from '@shared/sim/terrain';
@@ -114,7 +114,7 @@ export class NetSource implements MatchSource {
   private readonly welcomeCode: string;
   private readonly welcomeMax: number;
   private destroyedTiles = 0;
-  private inbox: { t: number; kind: 'tiles' | 'events' | 'frame' | 'pong'; tiles?: { d: number[]; r: number[] }; events?: SimEvent[]; frame?: Frame; pong?: number }[] = [];
+  private inbox: { t: number; kind: 'tiles' | 'events' | 'frame' | 'pong'; tiles?: TilesMessage; events?: SimEvent[]; frame?: Frame; pong?: number }[] = [];
   private frames: Frame[] = [];
   private history: { seq: number; input: PlayerInput; x: number; y: number }[] = [];
   private lastAckSeq = -1;
@@ -146,11 +146,11 @@ export class NetSource implements MatchSource {
     this.lagMs = lagMs;
     this.match = new Match(R, { seed: welcome.seed, map: this.map, waves: false, dryRun: true });
     this.match.addPlayer(this.localId);
-    this.match.applyDestroyed(welcome.destroyed);
-    this.destroyedTiles = welcome.destroyed.length;
+    this.match.applyTileOps(welcome.tiles);
+    for (let k = 1; k < welcome.tiles.length; k += 2) if ((welcome.tiles[k] & 15) === 0) this.destroyedTiles++;
 
     const now = () => performance.now();
-    room.onMessage(ServerMessage.Tiles, (tiles: { d: number[]; r: number[] }) => this.inbox.push({ t: now() + this.lagMs / 2, kind: 'tiles', tiles }));
+    room.onMessage(ServerMessage.Tiles, (tiles: TilesMessage) => this.inbox.push({ t: now() + this.lagMs / 2, kind: 'tiles', tiles }));
     room.onMessage(ServerMessage.Events, (events: SimEvent[]) => this.inbox.push({ t: now() + this.lagMs / 2, kind: 'events', events }));
     room.onMessage(ServerMessage.Pong, (t: number) => this.inbox.push({ t: now() + this.lagMs / 2, kind: 'pong', pong: t }));
     room.onStateChange(() => {
@@ -164,6 +164,12 @@ export class NetSource implements MatchSource {
     });
     room.onLeave((code) => this.drop(this.hostLeft ? 'HOST_LEFT' : `left (${code})`));
     room.onError((code, message) => this.drop(`error ${code}: ${message ?? ''}`));
+  }
+
+  /** send only while the socket is really open: after the server closes it there is a short
+   *  window (CLOSING) before onLeave fires, and sends in it just make the browser log errors */
+  private send(type: ClientMessage, payload?: unknown): void {
+    if (this.connected && this.room.connection.isOpen) this.room.send(type, payload);
   }
 
   private drop(reason: string): void {
@@ -205,7 +211,7 @@ export class NetSource implements MatchSource {
 
   /** host only: leave the lobby and start the waves */
   start(): void {
-    if (this.connected) this.room.send(ClientMessage.Start);
+    this.send(ClientMessage.Start);
   }
 
   get grid(): TileGrid {
@@ -326,15 +332,16 @@ export class NetSource implements MatchSource {
       const m = this.inbox[i];
       if (m.t > now) break;
       if (m.kind === 'tiles' && m.tiles) {
-        if (m.tiles.d?.length) {
-          changed.push(...this.match.applyDestroyed(m.tiles.d));
-          this.destroyedTiles += m.tiles.d.length;
+        // state: replay the server's ordered ops (carving, cracks, regrowth)
+        if (m.tiles.o?.length) changed.push(...this.match.applyTileOps(m.tiles.o));
+        // FX: debris / chips / regrow fade-in, exactly as in single-player
+        const d = m.tiles.d ?? [];
+        const c = m.tiles.c ?? [];
+        if (d.length || c.length) {
+          events.push({ t: 'carve', destroyed: d, ore: [], changed: [], mats: m.tiles.m ?? [], chipped: c });
+          this.destroyedTiles += d.length;
         }
-        if (m.tiles.r?.length) {
-          const ch = this.match.applyRestored(m.tiles.r);
-          changed.push(...ch);
-          events.push({ t: 'regrow', restored: m.tiles.r, changed: ch });
-        }
+        if (m.tiles.r?.length) events.push({ t: 'regrow', restored: m.tiles.r, changed: [] });
       } else if (m.kind === 'events' && m.events) {
         for (const e of m.events) {
           // the local dry-run already produced these for our own player
@@ -414,14 +421,14 @@ export class NetSource implements MatchSource {
     if (this.connected && this.pingTimer >= NET.pingIntervalMs) {
       this.pingTimer = 0;
       const t = now;
-      if (this.lagMs) setTimeout(() => this.connected && this.room.send(ClientMessage.Ping, t), this.lagMs / 2);
-      else this.room.send(ClientMessage.Ping, t);
+      if (this.lagMs) setTimeout(() => this.send(ClientMessage.Ping, t), this.lagMs / 2);
+      else this.send(ClientMessage.Ping, t);
     }
 
     // send input (optionally delayed) and predict locally
     if (this.connected) {
-      if (this.lagMs) setTimeout(() => this.connected && this.room.send(ClientMessage.Input, input), this.lagMs / 2);
-      else this.room.send(ClientMessage.Input, input);
+      if (this.lagMs) setTimeout(() => this.send(ClientMessage.Input, input), this.lagMs / 2);
+      else this.send(ClientMessage.Input, input);
     }
     this.match.setInput(this.localId, input);
     const localEvents = this.match.step(dt);

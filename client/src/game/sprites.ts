@@ -1,5 +1,6 @@
 import { Texture } from 'pixi.js';
 import { WEAPONS, BOMBS, type WeaponId, type BombType } from '@shared/weapons';
+import { GUN_ART, GUN_PALETTE } from '@shared/gunArt';
 
 type Rect = [number, number, number, number];
 
@@ -184,111 +185,9 @@ export function glowTexture(): Texture {
   return t;
 }
 
-// ---------------------------------------------------------------- weapons (pixel silhouettes)
-// Each weapon is a 16x7 pixel map. Legend: '#' body dark, '=' body light, 'c' weapon colour,
-// 'w' core/white, 'g' grip. The same map paints the held gun, the parachute drop and the HUD icon.
-
-const WEAPON_MAPS: Record<WeaponId, string[]> = {
-  blaster: [
-    '................',
-    '....#######.....',
-    '..==#######cw...',
-    '..==####==......',
-    '....g#..........',
-    '....gg..........',
-    '................',
-  ],
-  vector: [
-    '......###.......',
-    '..==######ccccw.',
-    '..==###ww#ccccw.',
-    '..==######ccccw.',
-    '....g###........',
-    '....gg..........',
-    '................',
-  ],
-  scatter: [
-    '................',
-    '.###############',
-    '.=====########c.',
-    '..#####=========',
-    '....g#..........',
-    '...gg...........',
-    '................',
-  ],
-  vulcan: [
-    '.....#..........',
-    '..###############',
-    '..#c#===========',
-    '..###############',
-    '..###===========',
-    '....gg#.........',
-    '.....gg.........',
-  ],
-  sniper: [
-    '.......c........',
-    '.####c#c#######w',
-    '.====######=====',
-    '..###ww#########',
-    '....g#.....##...',
-    '...gg......#.#..',
-    '................',
-  ],
-  emp: [
-    '.....ccc........',
-    '..####c#c###....',
-    '..==##cwc###cc..',
-    '..####c#c###c...',
-    '....g#..........',
-    '....gg..........',
-    '................',
-  ],
-  plasma: [
-    '................',
-    '..#####c#c#.....',
-    '..==#####cccw...',
-    '..==#####c#c#...',
-    '....g#..........',
-    '....gg..........',
-    '................',
-  ],
-  flamer: [
-    '..ccc...........',
-    '..ccc####.......',
-    '..ccc#####==#cc.',
-    '..ccc#####==#ww.',
-    '....g###........',
-    '....gg..........',
-    '................',
-  ],
-  arc: [
-    '.........c...c..',
-    '..#######c#c#c#.',
-    '..==#####cwcwcw.',
-    '..==#####c#c#c#.',
-    '....g#...c...c..',
-    '....gg..........',
-    '................',
-  ],
-  rail: [
-    '................',
-    '.#####c#c#c#c###',
-    '.====##########w',
-    '..###c#c#c#c#===',
-    '....g#..........',
-    '...gg...........',
-    '................',
-  ],
-  launcher: [
-    '................',
-    '.cccccccccccccc.',
-    '.c############w.',
-    '.c===========#w.',
-    '.cccccccccccccc.',
-    '.....g##........',
-    '.....gg.........',
-  ],
-};
+// ---------------------------------------------------------------- weapons (pixel art)
+// Each gun has its own size and silhouette (shared/src/gunArt.ts): the same art paints the held
+// gun, the parachute drop and the HUD icon, and the sim fires from its muzzle pixel.
 
 function paintMap(ctx: CanvasRenderingContext2D, rows: string[], palette: Record<string, string>): void {
   rows.forEach((row, y) => {
@@ -303,21 +202,30 @@ function paintMap(ctx: CanvasRenderingContext2D, rows: string[], palette: Record
 
 function weaponPalette(id: WeaponId): Record<string, string> {
   const w = WEAPONS[id];
-  return { '#': '#2a2f3d', '=': '#46586b', c: hex(w.color), w: hex(w.coreColor), g: '#5c4a3d' };
+  const pal: Record<string, string> = { c: hex(w.color), w: hex(w.coreColor) };
+  for (const [k, v] of Object.entries(GUN_PALETTE)) pal[k] = hex(v);
+  return pal;
 }
 
 function weaponCanvas(id: WeaponId): HTMLCanvasElement {
+  const art = GUN_ART[id];
   const c = document.createElement('canvas');
-  c.width = 16;
-  c.height = 7;
-  paintMap(c.getContext('2d')!, WEAPON_MAPS[id], weaponPalette(id));
+  c.width = art.rows[0].length;
+  c.height = art.rows.length;
+  paintMap(c.getContext('2d')!, art.rows, weaponPalette(id));
   return c;
 }
 
-/** one 16x7 texture per weapon (held gun + parachute drops) */
+/** where the glove holds each gun, as a texture anchor (0..1) */
+export function gunAnchor(id: WeaponId): { x: number; y: number } {
+  const a = GUN_ART[id];
+  return { x: (a.grip[0] + 0.5) / a.rows[0].length, y: (a.grip[1] + 0.5) / a.rows.length };
+}
+
+/** one texture per weapon, sized to its art (held gun + parachute drops) */
 export function weaponTextures(): Record<WeaponId, Texture> {
   const out = {} as Record<WeaponId, Texture>;
-  for (const id of Object.keys(WEAPON_MAPS) as WeaponId[]) {
+  for (const id of Object.keys(GUN_ART) as WeaponId[]) {
     const t = Texture.from(weaponCanvas(id));
     t.source.scaleMode = 'nearest';
     out[id] = t;

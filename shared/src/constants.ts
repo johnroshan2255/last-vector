@@ -118,6 +118,9 @@ export interface TerrainStyle {
   layout: 'caves' | 'tunnels' | 'open' | 'towers' | 'islands';
   /** fraction of the map height that is open sky (0 = sealed cave). Sky maps have no ceiling tiles; the world wall still holds. */
   openTop?: number;
+  /** how many veins of hard stone / pockets of loose sand to grow (defaults 12 / 20) */
+  hardVeins?: number;
+  sandPockets?: number;
 }
 
 // ---- Player ----
@@ -285,7 +288,8 @@ export const PVP = {
   damageScale: 0.7,
   /** explosions: fraction of the blast damage dealt to other players / to the bomb's owner */
   explosionScale: 0.6,
-  selfExplosionScale: 0.25,
+  /** your own rockets / bombs hurt you as much as anyone (Mini Militia): stand back */
+  selfExplosionScale: 0.6,
   /** seconds a dead player waits before respawning (online rooms only) */
   respawnSec: 3,
   /** spawn protection after (re)spawning: no damage taken, weapons still fire */

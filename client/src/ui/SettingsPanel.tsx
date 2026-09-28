@@ -4,7 +4,7 @@ import { isFullscreen, isStandalone, onFullscreenChange, supportsFullscreen, tog
 import { MAX_NAME_LENGTH } from '@shared/constants';
 import { BOMBS, BOMB_ORDER, START_KIT, WEAPONS, WEAPON_ORDER } from '@shared/weapons';
 import { bombIconUrl, weaponIconUrl } from '../game/sprites';
-import { mapsWithBomb, mapsWithWeapon } from '@shared/maps';
+import { mapsWithBomb } from '@shared/maps';
 import { ServerSettings } from './ServerSettings';
 
 export type SettingsTab = 'general' | 'server' | 'weapons' | 'bombs' | 'controls';
@@ -92,7 +92,7 @@ export function SettingsBody({ initialTab = 'general', isTouch = false }: { init
 
       {tab === 'weapons' && (
         <div className="tab-body" data-tab-body="weapons">
-          <p className="hint">Carry two. Drops parachute in every ~9 s, alternating weapons and bomb crates. Stand next to one and a TAKE button shows what you&apos;d swap: press it (or G) to take it. Each map drops its own set (Blaster + Vector Beam are always your start kit). The Flamer sets rock on fire; the EMP orb knocks jetpacks offline.</p>
+          <p className="hint">Carry two. Drops parachute in every ~9 s, alternating weapons and bomb crates. Stand next to one and a TAKE button shows what you&apos;d swap: press it (or G) to take it. Every weapon drops on every map and in every wave (Blaster + Vector Beam are always your start kit). The Flamer sets rock on fire; the EMP orb knocks jetpacks offline.</p>
           <div className="arsenal">
             {WEAPON_ORDER.map((id) => {
               const w = WEAPONS[id];
@@ -101,10 +101,10 @@ export function SettingsBody({ initialTab = 'general', isTouch = false }: { init
                   <div className="arsenal-head">
                     <img className="arsenal-icon" src={weaponIconUrl(id)} alt="" draggable={false} />
                     <span className="arsenal-name">{w.name}</span>
-                    <span className="arsenal-unlock">{START_KIT.includes(id) ? 'START KIT' : `DROPS · WAVE ${w.unlockWave}+`}</span>
+                    <span className="arsenal-unlock">{START_KIT.includes(id) ? 'START KIT' : 'DROPS · ALL WAVES'}</span>
                   </div>
                   <span className="arsenal-blurb">{w.blurb}</span>
-                  <span className="arsenal-maps">{START_KIT.includes(id) ? 'ALL MAPS' : mapsWithWeapon(id).map((m) => m.name).join(' · ') || '—'}</span>
+                  <span className="arsenal-maps">ALL MAPS</span>
                   <span className="arsenal-stats">
                     <b>DMG</b> {w.damage}
                     {w.kind === 'beam' ? '/s' : ''} · <b>RANGE</b> {w.range}

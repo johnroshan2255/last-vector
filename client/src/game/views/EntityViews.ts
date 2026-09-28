@@ -1,8 +1,9 @@
 import { Container, Graphics, Sprite, type Texture } from 'pixi.js';
 import { ALIENS, PPU, type AlienKind, type BiomeId, BIOMES } from '@shared/constants';
 import { BOMBS, WEAPONS } from '@shared/weapons';
+import { GLOVE_PX, GUN_ART, SHOULDER_Y_PX } from '@shared/gunArt';
 import type { AlienSnap, BombSnap, CloudSnap, DropSnap, PickupSnap, PlayerSnap, Snapshot } from '@shared/sim/events';
-import { astronautParts, bombPickupTexture, bombTexture, crateTextures, crawlerTextures, flameTextures, flyerTextures, fuelTexture, shardTexture, weaponTextures, type AstronautParts } from '../sprites';
+import { astronautParts, bombPickupTexture, bombTexture, crateTextures, crawlerTextures, flameTextures, flyerTextures, fuelTexture, shardTexture, weaponTextures, gunAnchor, type AstronautParts } from '../sprites';
 import { BOMB_ORDER, type BombType, type WeaponId } from '@shared/weapons';
 
 class KeyedViews<S extends { id: string }, V extends Container> {
@@ -77,10 +78,10 @@ class PlayerSprite extends Container {
     this.arm = new Sprite(parts.arm);
     this.arm.anchor.set(0, 0.5);
     this.gun = new Sprite(parts.gun);
-    this.gun.anchor.set(0.15, 0.55); // grip sits in the glove
-    this.gun.x = 6;
+    this.gun.anchor.set(0.15, 0.55);
+    this.gun.x = GLOVE_PX; // the glove holds the grip (each gun sets its own anchor)
     this.armPivot.addChild(this.arm, this.gun);
-    this.armPivot.y = -1; // shoulder
+    this.armPivot.y = SHOULDER_Y_PX; // shoulder
     this.bodyGroup.addChild(this.legs, this.torso, this.head);
     this.addChild(this.bodyGroup, this.armPivot);
   }
@@ -99,6 +100,22 @@ export class EntityViews {
   private readonly flames: Texture[];
   private animPhase = new Map<string, number>();
   private readonly parts = astronautParts();
+
+  /**
+   * debug: the held gun of a pilot as drawn: its size (px) and where the barrel tip pixel
+   * ends up in world units, read back from the sprite's actual transform
+   */
+  gunDebug(id: string, weapon: WeaponId): { w: number; h: number; tip: { x: number; y: number } } | null {
+    const v = this.players.get(id);
+    if (!v) return null;
+    const art = GUN_ART[weapon];
+    const t = v.gun.texture;
+    // local texture px → the gun's local space (anchor-relative) → world px
+    const lx = art.muzzle[0] - v.gun.anchor.x * t.width;
+    const ly = art.muzzle[1] + 0.5 - v.gun.anchor.y * t.height;
+    const p = this.container.toLocal(v.gun.toGlobal({ x: lx, y: ly }));
+    return { w: t.width, h: t.height, tip: { x: p.x / PPU, y: p.y / PPU } };
+  }
 
   constructor(
     biome: BiomeId,
@@ -135,7 +152,12 @@ export class EntityViews {
         // arm + gun point at the aim; flip the arm vertically when aiming left so the gun stays upright
         v.armPivot.rotation = s.aimAngle;
         v.armPivot.scale.y = Math.cos(s.aimAngle) < 0 ? -1 : 1;
-        v.gun.texture = this.weaponTex[s.weapon] ?? v.gun.texture;
+        const tex = this.weaponTex[s.weapon];
+        if (tex && v.gun.texture !== tex) {
+          v.gun.texture = tex;
+          const a = gunAnchor(s.weapon);
+          v.gun.anchor.set(a.x, a.y); // held by its own grip: the barrel tip lands on the sim's muzzle
+        }
         // recoil bob while firing the beam
         v.armPivot.x = s.beamOn ? Math.round(Math.sin(time * 40)) : 0;
         // hurt / invulnerability flash

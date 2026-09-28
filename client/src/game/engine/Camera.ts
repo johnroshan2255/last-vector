@@ -3,8 +3,10 @@ import { WORLD_WIDTH, WORLD_HEIGHT } from '@shared/constants';
 
 /**
  * World-pixel camera. Follows a target with lerp + aim lookahead, clamps to
- * the world, and positions the world container with integer snapping so
- * pixel art never shimmers.
+ * the world. The sim moves it in fixed steps; the renderer draws it
+ * interpolated between the last two steps (so motion is even at any display
+ * refresh rate) and snaps the world to whole *screen* pixels (so pixel art
+ * stays crisp and every zoom level scrolls in even steps).
  */
 export class Camera {
   x = WORLD_WIDTH / 2;
@@ -16,6 +18,12 @@ export class Camera {
   private shakeMag = 0;
   private ox = 0;
   private oy = 0;
+  /** position at the start of the current sim step (interpolation source) */
+  private px = this.x;
+  private py = this.y;
+  /** interpolated position the renderer uses (set by `interpolate`) */
+  private rx = this.x;
+  private ry = this.y;
 
   constructor(
     public vw: number,
@@ -30,6 +38,12 @@ export class Camera {
   shake(mag: number, seconds = 0.15): void {
     this.shakeMag = Math.max(this.shakeMag, mag);
     this.shakeT = Math.max(this.shakeT, seconds);
+  }
+
+  /** call at the start of every sim step: the interpolation source is where the camera was */
+  beginStep(): void {
+    this.px = this.x;
+    this.py = this.y;
   }
 
   follow(tx: number, ty: number, dt: number): void {
@@ -52,6 +66,15 @@ export class Camera {
     this.x = x;
     this.y = y;
     this.clamp();
+    this.px = this.rx = this.x;
+    this.py = this.ry = this.y;
+  }
+
+  /** render time: blend between the previous and the current sim step (alpha 0..1) */
+  interpolate(alpha: number): void {
+    const a = Math.min(1, Math.max(0, alpha));
+    this.rx = this.px + (this.x - this.px) * a;
+    this.ry = this.py + (this.y - this.py) * a;
   }
 
   private clamp(): void {
@@ -61,19 +84,20 @@ export class Camera {
     this.y = Math.min(Math.max(this.y, hh), Math.max(hh, WORLD_HEIGHT - hh));
   }
 
-  /** top-left of the view in world px (integer) */
+  /** top-left of the view in world px, as drawn this frame (interpolated, fractional) */
   get left(): number {
-    return Math.round(this.x + this.ox - this.vw / 2);
+    return this.rx + this.ox - this.vw / 2;
   }
   get top(): number {
-    return Math.round(this.y + this.oy - this.vh / 2);
+    return this.ry + this.oy - this.vh / 2;
   }
 
   /** @param zoom world scale (0.5 = scope view: twice as much cave on screen) */
   apply(world: Container, zoom = 1): void {
     world.scale.set(zoom);
-    world.x = -this.left * zoom;
-    world.y = -this.top * zoom;
+    // snap in screen pixels (not world pixels × zoom): even steps at every zoom level
+    world.x = Math.round(-this.left * zoom);
+    world.y = Math.round(-this.top * zoom);
   }
 
   screenToWorld(sx: number, sy: number): { x: number; y: number } {

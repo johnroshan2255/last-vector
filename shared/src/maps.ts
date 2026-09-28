@@ -1,6 +1,6 @@
 // LAST-VECTOR — maps. Each map is a cave/sky style + palette + its own weapon / bomb roster (Mini-Militia style).
 import type { BiomeId, TerrainStyle } from './constants.js';
-import type { BombType, WeaponId } from './weapons.js';
+import type { BombType } from './weapons.js';
 
 export type MapId = 'hollow' | 'furnace' | 'rift';
 
@@ -20,6 +20,20 @@ export interface SkyDef {
   motes: 'snow' | 'dust' | 'none';
 }
 
+/**
+ * The Blastronaut-style backdrop behind the cave (every map): a gradient sky with
+ * banks of chunky pixel clouds drifting at a few depths, and a darker back wall.
+ */
+export interface BackdropDef {
+  /** sky gradient, top → bottom of the screen */
+  top: number;
+  bottom: number;
+  /** cloud colours: body, sunlit top, shaded underside */
+  cloud: [number, number, number];
+  /** the back wall (far rock silhouette) */
+  wall: number;
+}
+
 export interface MapDef {
   id: MapId;
   name: string;
@@ -27,12 +41,12 @@ export interface MapDef {
   tagline: string;
   biome: BiomeId;
   terrain: TerrainStyle;
-  /** undefined = dark cave backdrop */
+  /** open-sky maps only (no ceiling): sun, stars, horizon silhouette */
   sky?: SkyDef;
+  /** sky + clouds + back wall behind the cave */
+  backdrop: BackdropDef;
   /** light-layer darkness outside light sources: 0 = full daylight, ~0.6 = cave gloom, 1 = pitch black */
   ambient: number;
-  /** weapons supply drops can carry here (start kit is always Blaster + Vector Beam) */
-  weapons: WeaponId[];
   /** bombs pilots carry here (first entry is selected at spawn) */
   bombs: BombType[];
 }
@@ -44,8 +58,9 @@ export const MAPS: Record<MapId, MapDef> = {
     tagline: 'Open caverns. Mid-range brawls.',
     biome: 'verdant',
     terrain: { fillChance: 0.5, smoothSteps: 5, birthLimit: 5, deathLimit: 4, layout: 'caves' },
-    ambient: 0.62,
-    weapons: ['scatter', 'vulcan', 'arc', 'plasma', 'emp'],
+    // warm salmon sky with cream clouds over teal back walls (Blastronaut's surface caves)
+    backdrop: { top: 0xb05f48, bottom: 0xe59c70, cloud: [0xebb18c, 0xf8dcbc, 0xc9836a], wall: 0x1b2a2c },
+    ambient: 0.2,
     bombs: ['gel', 'mine', 'smoke'],
   },
   furnace: {
@@ -53,9 +68,10 @@ export const MAPS: Record<MapId, MapDef> = {
     name: 'FURNACE',
     tagline: 'Tight tunnels through dense rock. Fire and rockets.',
     biome: 'ember',
-    terrain: { fillChance: 0.6, smoothSteps: 4, birthLimit: 5, deathLimit: 3, layout: 'tunnels' },
-    ambient: 0.6,
-    weapons: ['flamer', 'launcher', 'plasma', 'scatter'],
+    terrain: { fillChance: 0.6, smoothSteps: 4, birthLimit: 5, deathLimit: 3, layout: 'tunnels', hardVeins: 22, sandPockets: 8 },
+    // smoky dusk: ember-red sky, soot-maroon clouds
+    backdrop: { top: 0x3a1a2c, bottom: 0xbd5530, cloud: [0x8f3d36, 0xc8653f, 0x5c2532], wall: 0x241517 },
+    ambient: 0.28,
     bombs: ['heavy', 'impact', 'gel'],
   },
   rift: {
@@ -63,10 +79,11 @@ export const MAPS: Record<MapId, MapDef> = {
     name: 'RIFT',
     tagline: 'Floating islands under a night sky. Long sightlines.',
     biome: 'void',
-    terrain: { fillChance: 0.46, smoothSteps: 5, birthLimit: 5, deathLimit: 4, layout: 'islands', openTop: 0.42 },
-    sky: { top: 0x070516, bottom: 0x3a2a6e, horizon: 'mesas', horizonColor: 0x1a1230, sun: { x: 0.78, y: 0.22, r: 14, color: 0xe8e4ff, glow: 0x8c6cff }, stars: true, clouds: 3, cloudColor: 0x4a3d7a, motes: 'none' },
-    ambient: 0.3,
-    weapons: ['sniper', 'rail', 'arc', 'vulcan', 'emp'],
+    terrain: { fillChance: 0.46, smoothSteps: 5, birthLimit: 5, deathLimit: 4, layout: 'islands', openTop: 0.42, hardVeins: 8, sandPockets: 20 },
+    sky: { top: 0x2c2646, bottom: 0x6b5f8c, horizon: 'mesas', horizonColor: 0x2a2244, sun: { x: 0.78, y: 0.22, r: 14, color: 0xe8e4ff, glow: 0x8c6cff }, stars: true, clouds: 0, cloudColor: 0x4a3d7a, motes: 'none' },
+    // lavender dusk with grey-violet cloud banks
+    backdrop: { top: 0x2c2646, bottom: 0x6b5f8c, cloud: [0x8a80a6, 0xb6aeca, 0x5c5478], wall: 0x1e1a30 },
+    ambient: 0.16,
     bombs: ['cluster', 'mine', 'smoke'],
   },
 };
@@ -78,10 +95,7 @@ export function isMapId(v: unknown): v is MapId {
   return typeof v === 'string' && v in MAPS;
 }
 
-/** maps a weapon / bomb appears on (settings reference) */
-export function mapsWithWeapon(id: WeaponId): MapDef[] {
-  return MAP_ORDER.map((m) => MAPS[m]).filter((m) => m.weapons.includes(id));
-}
+/** maps a bomb appears on (settings reference); every weapon drops on every map */
 export function mapsWithBomb(id: BombType): MapDef[] {
   return MAP_ORDER.map((m) => MAPS[m]).filter((m) => m.bombs.includes(id));
 }

@@ -3,6 +3,12 @@ import { BEAM } from '../constants.js';
 import type { PlayerInput } from '../types.js';
 import { HEAT, START_KIT, WEAPONS, type WeaponDef, type WeaponId } from '../weapons.js';
 import { RAY_WEAPON } from './groups.js';
+
+/** the tile a ray hit (tile colliders sit on tile centres) */
+const tileOf = (c: RAPIER.Collider): { x: number; y: number } => {
+  const t = c.translation();
+  return { x: Math.floor(t.x), y: Math.floor(t.y) };
+};
 import type { SimEvent } from './events.js';
 
 /** Services a weapon needs from the match (kept as an interface so it's testable). */
@@ -10,7 +16,11 @@ export interface WeaponHost {
   R: typeof RAPIER;
   world: RAPIER.World;
   events: SimEvent[];
-  carve(x: number, y: number, radius: number): number;
+  /**
+   * `power`: hit points hard stone loses (default depends on the radius). `hitTile`: the tile the
+   * round actually struck, which always takes the hit (a small dig circle can miss its centre).
+   */
+  carve(x: number, y: number, radius: number, power?: number, hitTile?: { x: number; y: number }): number;
   /** true if the collider was something alive (alien or player; damage applied), false for rock */
   damageCollider(c: RAPIER.Collider, damage: number, fromX: number, fromY: number, knockback: number): boolean;
   /** everything the arc may seek: aliens + other players (never the shooter) */
@@ -25,6 +35,9 @@ export interface WeaponHost {
 
 export interface BeamState {
   on: boolean;
+  /** where the beam leaves the emitter (the muzzle) */
+  startX: number;
+  startY: number;
   endX: number;
   endY: number;
 }
@@ -33,13 +46,16 @@ interface Shooter {
   id: string;
   dead: boolean;
   collider: RAPIER.Collider;
-  muzzle(offset: number): { x: number; y: number };
+  /** the tip of the held gun's barrel (units) */
+  gunMuzzle(id: WeaponId): { x: number; y: number };
+  /** the shoulder the gun pivots on (units) */
+  shoulder(): { x: number; y: number };
   recoil(angle: number, amount: number): void;
 }
 
 /**
  * Per-player weapon state: selection, unlocks, the shared heat pool and the
- * fire logic for all six weapons. Pure sim; emits events for FX.
+ * fire logic for every weapon. Pure sim; emits events for FX.
  */
 export class SimWeapons {
   /** two carried weapons; slot 1 may be empty */
@@ -47,7 +63,7 @@ export class SimWeapons {
   active: 0 | 1 = 0;
   heat = 0;
   overheated = false;
-  beam: BeamState = { on: false, endX: 0, endY: 0 };
+  beam: BeamState = { on: false, startX: 0, startY: 0, endX: 0, endY: 0 };
   private cooldown = 0;
   private arcAcc = 0;
   private digAcc = 0;
@@ -115,7 +131,7 @@ export class SimWeapons {
     if (this.overheated && this.heat <= HEAT.overheatResumeAt) this.overheated = false;
     const wantFire = input.fire && !this.overheated && !shooter.dead;
     this.cooldown = Math.max(0, this.cooldown - dt);
-    const muzzle = shooter.muzzle(BEAM.muzzleOffset);
+    const muzzle = this.muzzleFor(shooter, def.id, host);
     const angle = input.aimAngle;
 
     // ---- beam
@@ -127,6 +143,8 @@ export class SimWeapons {
       const dir = { x: Math.cos(angle), y: Math.sin(angle) };
       const h = host.world.castRay(new host.R.Ray(muzzle, dir), def.range, true, undefined, RAY_WEAPON, shooter.collider);
       const toi = h ? h.timeOfImpact : def.range;
+      this.beam.startX = muzzle.x;
+      this.beam.startY = muzzle.y;
       this.beam.endX = muzzle.x + dir.x * toi;
       this.beam.endY = muzzle.y + dir.y * toi;
       if (h) {
@@ -134,7 +152,7 @@ export class SimWeapons {
         this.digAcc += dt;
         if (this.digAcc >= BEAM.digIntervalSec) {
           this.digAcc -= BEAM.digIntervalSec;
-          if (!isAlien) host.carve(this.beam.endX + dir.x * 0.35, this.beam.endY + dir.y * 0.35, def.digRadius);
+          if (!isAlien) host.carve(this.beam.endX + dir.x * 0.35, this.beam.endY + dir.y * 0.35, def.digRadius, 1, tileOf(h.collider)); // the mining beam only scratches hard stone
           host.events.push({ t: 'beamDig', id: shooter.id, weapon: def.id, x: this.beam.endX, y: this.beam.endY, angle });
         }
       } else this.digAcc = 0;
@@ -177,30 +195,58 @@ export class SimWeapons {
     if (!wantFire) this.heat = Math.max(0, this.heat - HEAT.coolPerSecond * dt);
   }
 
+  /**
+   * Rounds leave from the tip of the drawn barrel. If the barrel pokes into rock (or into
+   * someone), the round starts just in front of what it touches: point-blank shots hit the
+   * wall they're pressed against instead of passing through it.
+   */
+  private muzzleFor(shooter: Shooter, id: WeaponId, host: WeaponHost): { x: number; y: number } {
+    const s = shooter.shoulder();
+    const m = shooter.gunMuzzle(id);
+    const dx = m.x - s.x;
+    const dy = m.y - s.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-4) return m;
+    const dir = { x: dx / len, y: dy / len };
+    const h = host.world.castRay(new host.R.Ray(s, dir), len, true, undefined, RAY_WEAPON, shooter.collider);
+    if (!h) return m;
+    const t = Math.max(0, h.timeOfImpact - 0.03);
+    return { x: s.x + dir.x * t, y: s.y + dir.y * t };
+  }
+
   private fireRail(origin: { x: number; y: number }, angle: number, def: WeaponDef, shooter: Shooter, host: WeaponHost): void {
     const dir = { x: Math.cos(angle), y: Math.sin(angle) };
     const hits: { x: number; y: number }[] = [];
-    // walk the line: stop at the first rock, pass through aliens
-    let start = { ...origin };
-    let remaining = def.range;
+    // walk the line from the muzzle: stop at the first rock, pass through aliens / pilots.
+    // Everything already hit is filtered out of the next cast, so a fat target is only hit once.
+    const done = new Set<number>([shooter.collider.handle]);
+    const skipDone = (c: RAPIER.Collider) => !done.has(c.handle);
     let end = { x: origin.x + dir.x * def.range, y: origin.y + dir.y * def.range };
-    for (let guard = 0; guard < 12 && remaining > 0; guard++) {
-      const h = host.world.castRay(new host.R.Ray(start, dir), remaining, true, undefined, RAY_WEAPON, shooter.collider);
+    for (let guard = 0; guard < 12; guard++) {
+      const h = host.world.castRay(new host.R.Ray(origin, dir), def.range, true, undefined, RAY_WEAPON, undefined, undefined, skipDone);
       if (!h) break;
-      const px = start.x + dir.x * h.timeOfImpact;
-      const py = start.y + dir.y * h.timeOfImpact;
-      const isAlien = host.damageCollider(h.collider, def.damage, start.x, start.y, def.knockback);
+      const px = origin.x + dir.x * h.timeOfImpact;
+      const py = origin.y + dir.y * h.timeOfImpact;
+      const isAlien = host.damageCollider(h.collider, def.damage, origin.x, origin.y, def.knockback);
       hits.push({ x: px, y: py });
+      done.add(h.collider.handle);
       if (!isAlien) {
         end = { x: px, y: py };
-        host.carve(px + dir.x * 0.3, py + dir.y * 0.3, def.digRadius);
+        host.carve(px + dir.x * 0.3, py + dir.y * 0.3, def.digRadius, undefined, tileOf(h.collider));
         break;
       }
-      remaining -= h.timeOfImpact + 0.8;
-      start = { x: px + dir.x * 0.8, y: py + dir.y * 0.8 };
-      end = { x: start.x + dir.x * remaining, y: start.y + dir.y * remaining };
     }
     host.events.push({ t: 'rail', id: shooter.id, weapon: def.id, x0: origin.x, y0: origin.y, x1: end.x, y1: end.y, hits });
+  }
+
+  /** true if nothing solid (rock or another body) sits between `from` and the target */
+  private canSee(from: { x: number; y: number }, target: { x: number; y: number; collider: RAPIER.Collider }, exclude: RAPIER.Collider, host: WeaponHost): boolean {
+    const dx = target.x - from.x;
+    const dy = target.y - from.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 1e-4) return true;
+    const h = host.world.castRay(new host.R.Ray(from, { x: dx / d, y: dy / d }), d, true, undefined, RAY_WEAPON, exclude);
+    return !h || h.collider.handle === target.collider.handle;
   }
 
   private fireArc(origin: { x: number; y: number }, angle: number, def: WeaponDef, shooter: Shooter, host: WeaponHost): void {
@@ -216,13 +262,15 @@ export class SimWeapons {
         return { t, d, da };
       })
       .filter((o) => o.d <= def.range && Math.abs(o.da) <= def.spread)
-      .sort((a, b) => a.d - b.d);
+      .sort((a, b) => a.d - b.d)
+      // lightning never passes through rock: only the nearest target in plain sight is struck
+      .filter((o) => this.canSee(origin, o.t, shooter.collider, host));
 
     const path: { x: number; y: number }[] = [origin];
     const hits: { x: number; y: number }[] = [];
     if (inCone.length) {
       const hitSet = new Set<number>();
-      let from = origin;
+      let from: { x: number; y: number } = origin;
       let target = inCone[0].t;
       for (let hop = 0; hop <= (def.chain ?? 0); hop++) {
         path.push({ x: target.x, y: target.y });
@@ -230,12 +278,13 @@ export class SimWeapons {
         host.damageCollider(target.collider, def.damage, from.x, from.y, def.knockback);
         hitSet.add(target.collider.handle);
         from = target;
+        const fromCollider = target.collider;
         let best: (typeof targets)[number] | null = null;
         let bestD = def.chainRange ?? 0;
         for (const t of targets) {
           if (hitSet.has(t.collider.handle)) continue;
           const d = Math.hypot(t.x - from.x, t.y - from.y);
-          if (d <= bestD) {
+          if (d <= bestD && this.canSee(from, t, fromCollider, host)) {
             bestD = d;
             best = t;
           }
@@ -252,7 +301,7 @@ export class SimWeapons {
       if (h) {
         hits.push(end);
         if (!host.damageCollider(h.collider, def.damage, origin.x, origin.y, def.knockback)) {
-          host.carve(end.x + dir.x * 0.3, end.y + dir.y * 0.3, def.digRadius);
+          host.carve(end.x + dir.x * 0.3, end.y + dir.y * 0.3, def.digRadius, undefined, tileOf(h.collider));
         }
       }
     }
@@ -312,7 +361,7 @@ export class ProjectileSim {
           else {
             const isAlien = host.damageCollider(h.collider, d.damage, p.x, p.y, d.knockback);
             if (isAlien && d.burn) host.burnCollider(h.collider, d.burn.dps, d.burn.sec);
-            if (!isAlien && d.digRadius > 0) host.carve(hx + (sx / len) * 0.3, hy + (sy / len) * 0.3, d.digRadius);
+            if (!isAlien && d.digRadius > 0) host.carve(hx + (sx / len) * 0.3, hy + (sy / len) * 0.3, d.digRadius, undefined, tileOf(h.collider));
             // fire doesn't dig: it sets the rock alight and the tile breaks once burnt through
             if (!isAlien && d.burn) host.igniteTile(hx + (sx / len) * 0.3, hy + (sy / len) * 0.3);
             host.events.push({ t: 'hit', weapon: d.id, x: hx, y: hy, angle: Math.atan2(-p.vy, -p.vx), alien: isAlien });

@@ -1,5 +1,6 @@
 import { Geometry, Mesh, Shader, type Texture } from 'pixi.js';
-import { BEAM, PPU } from '@shared/constants';
+import { muzzlePoint } from '@shared/gunArt';
+import { PPU } from '@shared/constants';
 import type { Snapshot } from '@shared/sim/events';
 import type { Camera } from '../engine/Camera';
 
@@ -146,8 +147,7 @@ export class LightLayer {
       this.add(p.x * PPU - L, p.y * PPU - T, 96 * flick, 1);
       if (p.thrusting) this.add(p.x * PPU - L, (p.y + 0.6) * PPU - T, 34, 0.9, 0xbff4ff);
       if (p.beamOn) {
-        const mx = p.x + Math.cos(p.aimAngle) * BEAM.muzzleOffset;
-        const my = p.y + Math.sin(p.aimAngle) * BEAM.muzzleOffset;
+        const { x: mx, y: my } = muzzlePoint(p.x, p.y, p.aimAngle, 'vector');
         const segs = 4;
         for (let i = 0; i <= segs; i++) {
           const t = i / segs;
